@@ -1,34 +1,160 @@
-# minecraft-manager
+# ⚡ Nexus MC
 
-An Electron application with React
+Minecraftサーバーをまとめて管理できるデスクトップアプリです。
+Fabric / Paper サーバーのインストールから起動・停止、Mod管理、Velocityクラスター構築まで、GUIだけで完結します。
 
-## Recommended IDE Setup
+> **Windows向け**に開発・動作確認しています。
 
-- [VSCode](https://code.visualstudio.com/) + [ESLint](https://marketplace.visualstudio.com/items?itemName=dbaeumer.vscode-eslint) + [Prettier](https://marketplace.visualstudio.com/items?itemName=esbenp.prettier-vscode)
+---
 
-## Project Setup
+## 主な機能
 
-### Install
+### サーバー管理
+- **Fabricサーバー** の自動インストール（バージョン選択対応）
+- **Paperサーバー** の自動インストール（バージョン選択対応）
+- サーバーの **起動 / 停止** をワンクリックで操作
+- リアルタイムの **ログ表示** とコンソールへの **コマンド送信**
+- `server.properties` をGUIで編集（難易度・ゲームモード・RCON等）
+- **ポート競合の自動検知**（同じポートを複数サーバーが使っているとき警告表示）
+- サーバーの **バックアップ** / **ワールドデータ削除**
+- 既存サーバーフォルダの **インポート**（スキャンして自動認識）
+- サーバープロファイルのコピー（設定をそのまま別サーバーに流用）
+- クラッシュ時の **自動再起動**
+
+### クラスター管理（Velocity プロキシ）
+- **Velocity プロキシ** の自動インストール・起動・停止
+- クラスター内のPaper / Fabricサーバーをまとめて管理
+- Velocityの `velocity.toml` をGUIで自動生成・編集
+- クラスター共通設定（難易度・ゲームモード等）を一括変更
+- Velocityプラグイン / Modの一覧管理・適用
+
+### Mod / プラグイン管理
+- **Modライブラリ**をフォルダ単位で登録（Fabric / Forge / NeoForge対応）
+- ライブラリ内のModをサーバーへチェックボックスで適用
+- **FabricAPI** と **FabricProxy-Lite** は常時ONでロック（Shift+クリックで解除可）
+- マスターチェックボックスで全Modを一括ON/OFF
+- Paperプラグイン / Velocityプラグインも同様に管理
+
+### その他
+- **グローバルIP表示**（クリックでコピー）
+- ライト / ダークモード切替（設定は自動保存）
+- ベースディレクトリを設定して、サーバーフォルダを一元管理
+
+---
+
+## スクリーンショット
+
+> *(準備中)*
+
+---
+
+## 導入方法
+
+### 1. インストーラーをダウンロード
+
+[Releases](https://github.com/Simohayhe/Minecraft-Manager/releases) から最新の `.exe`（インストーラー）をダウンロードしてください。
+
+### 2. インストール
+
+ダウンロードした `.exe` を実行してインストールします。
+インストール完了後、デスクトップのショートカットまたはスタートメニューからアプリを起動してください。
+
+---
+
+## 初期設定
+
+アプリを初めて起動したら、まず **ベースディレクトリ** を設定します。
+
+1. 左サイドバーの **「⚙ 設定」** を開く
+2. **「ベースディレクトリ」** のフォルダアイコンをクリックして、サーバーファイルを保存したいフォルダを選択
+3. 設定を保存
+
+> ベースディレクトリ配下に各サーバーのフォルダが自動で作成されます。
+
+---
+
+## 使い方
+
+### スタンドアロンサーバーを作る
+
+1. **「サーバー管理」** → **「スタンドアロン」** タブを開く
+2. **「＋ サーバー追加」** をクリック
+3. サーバー名・ポート・ローダー（Fabric / Paper）・バージョンを選択して作成
+4. サーバーカードの **「インストール」** ボタンでファイルを自動ダウンロード
+5. インストール完了後、**「起動」** ボタンで開始
+
+### クラスターを作る（Velocity + 複数サーバー）
+
+1. **「＋ クラスター追加」** をクリックしてクラスターを作成
+2. クラスター内で **「＋ サーバー追加」** して子サーバーを追加
+3. 各サーバーをインストール後、 **「Velocity」** タブからVelocityもインストール
+4. **「クラスター起動」** でVelocity＋全子サーバーをまとめて起動
+
+### Modを管理する
+
+1. **「📦 Mod管理」** を開く
+2. **「＋ Modフォルダを登録」** でModが入っているフォルダを登録
+3. **「サーバー管理」** → サーバーを選択 → **「Mod」** タブを開く
+4. 適用したいModにチェックを入れて **「適用」** をクリック
+
+### 既存サーバーをインポートする
+
+1. **「インポート」** ボタンをクリック
+2. 既存サーバーフォルダのパスを選択
+3. 自動スキャンされてサーバー情報が取り込まれる
+
+---
+
+## 動作要件
+
+| 項目 | 要件 |
+|------|------|
+| OS | Windows 10 / 11（64bit） |
+| Java | 17以上（Minecraftサーバーの起動に必要） |
+| インターネット | サーバーファイルのダウンロード時に必要 |
+
+> Javaは別途インストールしてください。[Adoptium](https://adoptium.net/) からダウンロードできます。
+
+---
+
+## 開発者向け
+
+### セットアップ
 
 ```bash
-$ npm install
+git clone https://github.com/Simohayhe/Minecraft-Manager.git
+cd Minecraft-Manager
+npm install
 ```
 
-### Development
+### 開発サーバー起動
 
 ```bash
-$ npm run dev
+npm run dev
 ```
 
-### Build
+### ビルド
 
 ```bash
-# For windows
-$ npm run build:win
+# Windows
+npm run build:win
 
-# For macOS
-$ npm run build:mac
+# macOS
+npm run build:mac
 
-# For Linux
-$ npm run build:linux
+# Linux
+npm run build:linux
 ```
+
+### 技術スタック
+
+- [Electron](https://www.electronjs.org/)
+- [React](https://react.dev/)
+- [electron-vite](https://electron-vite.org/)
+- [electron-builder](https://www.electron.build/)
+
+---
+
+## ライセンス
+
+MIT
