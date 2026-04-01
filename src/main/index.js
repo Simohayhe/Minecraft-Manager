@@ -7,6 +7,10 @@ import { spawn } from 'child_process'
 import { createConnection } from 'net'
 import icon from '../../resources/icon.png?asset'
 
+// ─── MariaDB globals ─────────────────────────────────────────────────────────
+let dbProcess = null
+const DB_DIR_NAME = 'nexus-db'
+
 const DATA_PATH = join(app.getPath('userData'), 'servers.json')
 const SETTINGS_PATH = join(app.getPath('userData'), 'settings.json')
 const PID_PATH = join(app.getPath('userData'), 'pids.json')
@@ -383,10 +387,9 @@ unsupported-settings:
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 800,
-    minWidth: 680,
-    minHeight: 590,
+    width: 1400,
+    height: 700,
+    resizable: false,
     title: 'Nexus MC',
     show: false,
     autoHideMenuBar: true,
@@ -417,21 +420,26 @@ function spawnServerProcess(serverId, opts) {
   const javaBin = javaPath || 'java'
   const memStr = jvmMemory ? `${jvmMemory.value}${jvmMemory.unit}` : '2G'
   const jar = serverType === 'paper' ? 'paper.jar' : 'fabric-server-launch.jar'
-  const proc = spawn(javaBin, [`-Xms${memStr}`, `-Xmx${memStr}`, '-jar', jar, 'nogui'], {
-    cwd: serverDir, shell: !javaPath
-  })
+  // UTF-8フラグでログ文字化けを防止
+  const proc = spawn(javaBin, [
+    '-Dfile.encoding=UTF-8',
+    '-Dstdout.encoding=UTF-8',
+    '-Dconsole.encoding=UTF-8',
+    `-Xms${memStr}`, `-Xmx${memStr}`, '-jar', jar, 'nogui'
+  ], { cwd: serverDir, shell: !javaPath })
   processes[serverId] = proc
   const pids = loadPids()
   pids[serverId] = proc.pid
   savePids(pids)
-  proc.stdout.on('data', (d) => {
-    const msg = d.toString()
+  proc.stdout.setEncoding('utf8')
+  proc.stderr.setEncoding('utf8')
+  proc.stdout.on('data', (msg) => {
     mainWindow.webContents.send(`log-${serverId}`, msg)
     if (msg.includes('Done') && msg.includes('For help')) {
       mainWindow.webContents.send(`started-${serverId}`)
     }
   })
-  proc.stderr.on('data', (d) => mainWindow.webContents.send(`log-${serverId}`, d.toString()))
+  proc.stderr.on('data', (msg) => mainWindow.webContents.send(`log-${serverId}`, msg))
   proc.on('close', (code) => {
     delete processes[serverId]
     const p = loadPids(); delete p[serverId]; savePids(p)
@@ -471,12 +479,32 @@ app.whenReady().then(() => {
     return true
   })
 
-  ipcMain.handle('create-cluster-dir', (_, { clusterName, baseDir }) => {
+  ipcMain.handle('create-cluster-dir', async (_, { clusterName, baseDir }) => {
     const clusterDir = join(baseDir, clusterName)
     const velocityDir = join(clusterDir, 'velocity')
     if (!existsSync(clusterDir)) mkdirSync(clusterDir, { recursive: true })
     if (!existsSync(velocityDir)) mkdirSync(velocityDir, { recursive: true })
-    return { clusterDir, velocityDir }
+
+    // クラスター用 DB スキーマを自動作成
+    let schemaName = null
+    if (dbProcess) {
+      try {
+        const mysql = require('mysql2/promise')
+        const settings = loadSettings()
+        const db = settings.db
+        if (db) {
+          const conn = await mysql.createConnection({
+            host: '127.0.0.1', port: db.port || 3306,
+            user: 'root', password: db.password
+          })
+          schemaName = `${clusterName}_DB`.replace(/[^a-zA-Z0-9_]/g, '_')
+          await conn.execute(`CREATE DATABASE IF NOT EXISTS \`${schemaName}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`)
+          await conn.end()
+        }
+      } catch { /* DB未起動時は無視 */ }
+    }
+
+    return { clusterDir, velocityDir, schemaName }
   })
 
   ipcMain.handle('install-velocity', async (_, { velocityDir }) => {
@@ -765,6 +793,65 @@ app.whenReady().then(() => {
           send('Fabric API インストール完了！')
         }
       }
+
+      // ClusterConnect
+      send('ClusterConnect を取得中...')
+      try {
+        const { net: net2 } = await import('electron')
+        const ccRelease = await new Promise((resolve, reject) => {
+          const r = net2.request({ url: 'https://api.github.com/repos/Simohayhe/ClusterConnectFabric/releases/latest', headers: { 'User-Agent': 'nexus-mc/1.0' } })
+          let d2 = ''; r.on('response', res => { res.on('data', c => { d2 += c }); res.on('end', () => { try { resolve(JSON.parse(d2)) } catch(e) { reject(e) } }) }); r.on('error', reject); r.end()
+        })
+        const ccAsset = (ccRelease.assets || []).find(a => a.name.endsWith('.jar'))
+        if (ccAsset) {
+          send(`ClusterConnect ${ccRelease.tag_name} をダウンロード中...`)
+          await downloadFile(ccAsset.browser_download_url, join(modsDir, ccAsset.name))
+          send('ClusterConnect インストール完了！')
+        }
+      } catch (e) { send(`ClusterConnect 取得失敗（スキップ）: ${e.message}`) }
+
+      // ClusterConnect 設定ファイル
+      writeFileSync(join(configDir, 'clusterconnect.json'),
+        JSON.stringify({ secret_key: forwardingSecret }, null, 2), 'utf-8')
+
+      // Invsync
+      send('Invsync を取得中...')
+      try {
+        const { net: net3 } = await import('electron')
+        const isRelease = await new Promise((resolve, reject) => {
+          const r = net3.request({ url: 'https://api.github.com/repos/Simohayhe/Invsyncmod/releases/latest', headers: { 'User-Agent': 'nexus-mc/1.0' } })
+          let d3 = ''; r.on('response', res => { res.on('data', c => { d3 += c }); res.on('end', () => { try { resolve(JSON.parse(d3)) } catch(e) { reject(e) } }) }); r.on('error', reject); r.end()
+        })
+        const isAsset = (isRelease.assets || []).find(a => a.name.endsWith('.jar'))
+        if (isAsset) {
+          send(`Invsync ${isRelease.tag_name} をダウンロード中...`)
+          await downloadFile(isAsset.browser_download_url, join(modsDir, isAsset.name))
+          send('Invsync インストール完了！')
+        }
+      } catch (e) { send(`Invsync 取得失敗（スキップ）: ${e.message}`) }
+
+      // Invsync 設定ファイル（invsyncmod.properties）
+      // サーバー名を server.properties の level-name から取得
+      const propsPath = join(serverDir, 'server.properties')
+      let serverShortName = serverDir.split(/[\\/]/).pop() || 's1'
+      if (existsSync(propsPath)) {
+        const content = readFileSync(propsPath, 'utf-8')
+        const m = content.match(/^level-name=(.+)$/m)
+        if (m) serverShortName = m[1].trim()
+      }
+      const dbSettings = loadSettings().db
+      const invsyncConfig = [
+        `server.name=${serverShortName}`,
+        `db.host=localhost`,
+        `db.port=${dbSettings?.port || 3306}`,
+        `db.name=${serverDir.split(/[\\/]/).slice(-2, -1)[0] || 'minecraftdb1'}_DB`.replace(/[^a-zA-Z0-9_]/g, '_'),
+        `db.user=root`,
+        `db.password=${dbSettings?.password || ''}`,
+        ``,
+        `db.pool.max=10`,
+        `db.pool.timeout=30000`,
+      ].join('\n')
+      writeFileSync(join(configDir, 'invsyncmod.properties'), invsyncConfig, 'utf-8')
 
       send('プロキシセットアップ完了！')
       return { success: true }
@@ -1708,6 +1795,221 @@ ipcMain.handle('install-update', () => {
   autoUpdater.quitAndInstall()
 })
 
+// ─── 必須Mod チェック & 修復 ────────────────────────────────────────────────────
+
+// 必須Mod（ClusterConnect / FabricAPI）の存在確認
+ipcMain.handle('check-required-mods', (_, { serverDir, isCluster }) => {
+  const modsDir = join(serverDir, 'mods')
+  if (!existsSync(modsDir)) return { ok: false, missing: ['FabricAPI', 'ClusterConnect', 'Invsync'] }
+
+  const files = readdirSync(modsDir).filter(f => f.endsWith('.jar')).map(f => f.toLowerCase())
+  const hasFabricApi       = files.some(f => f.includes('fabric-api') || f.includes('fabricapi'))
+  const hasClusterConnect  = files.some(f => f.includes('clusterconnect'))
+  const hasInvsync         = files.some(f => f.includes('invsync'))
+
+  const missing = []
+  if (!hasFabricApi) missing.push('FabricAPI')
+  if (isCluster) {
+    if (!hasClusterConnect) missing.push('ClusterConnect')
+    if (!hasInvsync) missing.push('Invsync')
+  }
+  return { ok: missing.length === 0, missing }
+})
+
+// 必須Mod 修復（再ダウンロード）
+ipcMain.handle('repair-required-mods', async (_, { serverDir, mcVersion, forwardingSecret, missingMods }) => {
+  const { net } = await import('electron')
+  const fs = require('fs')
+  const modsDir = join(serverDir, 'mods')
+  const configDir = join(serverDir, 'config')
+  if (!existsSync(modsDir)) mkdirSync(modsDir, { recursive: true })
+  if (!existsSync(configDir)) mkdirSync(configDir, { recursive: true })
+  const send = (msg) => mainWindow?.webContents.send('install-log', msg)
+
+  const fetchJson = (url) => new Promise((resolve, reject) => {
+    const req = net.request({ url, headers: { 'User-Agent': 'nexus-mc/1.0' } })
+    let d = ''; req.on('response', r => { r.on('data', c => { d += c }); r.on('end', () => { try { resolve(JSON.parse(d)) } catch (e) { reject(e) } }) }); req.on('error', reject); req.end()
+  })
+  const downloadFile = (url, filePath) => new Promise((resolve, reject) => {
+    const req = net.request(url)
+    req.on('response', r => { const file = fs.createWriteStream(filePath); r.on('data', c => file.write(c)); r.on('end', () => { file.close(); resolve() }) }); req.on('error', reject); req.end()
+  })
+
+  const results = []
+  if (missingMods.includes('FabricAPI') && mcVersion) {
+    try {
+      send('FabricAPI を修復中...')
+      const versions = await fetchJson(`https://api.modrinth.com/v2/project/fabric-api/version?loaders=%5B%22fabric%22%5D&game_versions=%5B%22${mcVersion}%22%5D`)
+      const file = versions?.[0]?.files?.find(f => f.primary) || versions?.[0]?.files?.[0]
+      if (file) { await downloadFile(file.url, join(modsDir, file.filename)); results.push('FabricAPI') }
+    } catch (e) { send(`FabricAPI 修復失敗: ${e.message}`) }
+  }
+  if (missingMods.includes('ClusterConnect')) {
+    try {
+      send('ClusterConnect を修復中...')
+      const rel = await fetchJson('https://api.github.com/repos/Simohayhe/ClusterConnectFabric/releases/latest')
+      const asset = (rel.assets || []).find(a => a.name.endsWith('.jar'))
+      if (asset) { await downloadFile(asset.browser_download_url, join(modsDir, asset.name)); results.push('ClusterConnect') }
+      if (forwardingSecret) writeFileSync(join(configDir, 'clusterconnect.json'), JSON.stringify({ secret_key: forwardingSecret }, null, 2), 'utf-8')
+    } catch (e) { send(`ClusterConnect 修復失敗: ${e.message}`) }
+  }
+  if (missingMods.includes('Invsync')) {
+    try {
+      send('Invsync を修復中...')
+      const rel = await fetchJson('https://api.github.com/repos/Simohayhe/Invsyncmod/releases/latest')
+      const asset = (rel.assets || []).find(a => a.name.endsWith('.jar'))
+      if (asset) { await downloadFile(asset.browser_download_url, join(modsDir, asset.name)); results.push('Invsync') }
+    } catch (e) { send(`Invsync 修復失敗: ${e.message}`) }
+  }
+  send('修復完了！')
+  return { success: true, repaired: results }
+})
+
+// apply-server-mods: 必須Modはlibrary管理外でも削除しない
+// ─── ライブラリフォルダ自動生成 ─────────────────────────────────────────────────
+
+// [Loader]-[Version] 形式のModソースフォルダを自動作成・登録
+ipcMain.handle('ensure-mod-source-folder', (_, { loader, version, baseDir }) => {
+  const folderName = `${loader.charAt(0).toUpperCase() + loader.slice(1)}-${version}`
+  const folderPath = join(baseDir, 'mods', folderName)
+  if (!existsSync(folderPath)) mkdirSync(folderPath, { recursive: true })
+  const data = loadData()
+  if (!data.modSources) data.modSources = []
+  const exists = data.modSources.some(s => s.loader === loader && s.version === version)
+  if (!exists) {
+    data.modSources.push({ id: Date.now().toString(), loader, version, dir: folderPath })
+    saveData(data)
+  }
+  return { folderPath, folderName }
+})
+
+// ─── Diagnostics / Network ────────────────────────────────────────────────────
+
+// ローカル IP 取得
+ipcMain.handle('get-local-ip', () => {
+  const os = require('os')
+  const ifaces = os.networkInterfaces()
+  for (const name of Object.keys(ifaces)) {
+    for (const iface of ifaces[name]) {
+      if (iface.family === 'IPv4' && !iface.internal) return iface.address
+    }
+  }
+  return '取得失敗'
+})
+
+// ダウンロード速度テスト（Cloudflare 5MB ファイルで計測）
+ipcMain.handle('diag-speed-test', async () => {
+  const { net } = await import('electron')
+  const TEST_URL = 'https://speed.cloudflare.com/__down?bytes=5000000'
+  const TEST_BYTES = 5_000_000
+  return new Promise((resolve) => {
+    const start = Date.now()
+    let received = 0
+    const req = net.request(TEST_URL)
+    req.on('response', r => {
+      r.on('data', c => { received += c.length })
+      r.on('end', () => {
+        const elapsed = (Date.now() - start) / 1000
+        const mbps = ((received * 8) / elapsed / 1_000_000).toFixed(1)
+        resolve({ success: true, mbps: parseFloat(mbps), bytes: received, seconds: elapsed.toFixed(2) })
+      })
+      r.on('error', () => resolve({ success: false }))
+    })
+    req.on('error', () => resolve({ success: false }))
+    req.setTimeout(30000)
+    req.end()
+  })
+})
+
+// UPnP でポートを開放
+ipcMain.handle('diag-upnp-open-port', async (_, { port, protocol }) => {
+  return new Promise((resolve) => {
+    try {
+      const natUpnp = require('nat-upnp')
+      const client = natUpnp.createClient()
+      client.portMapping({
+        public: parseInt(port),
+        private: parseInt(port),
+        ttl: 86400,
+        protocol: (protocol || 'tcp').toUpperCase(),
+        description: `NexusMC-${port}`
+      }, (err) => {
+        client.close()
+        if (err) resolve({ success: false, error: err.message })
+        else resolve({ success: true })
+      })
+      setTimeout(() => { try { client.close() } catch { /* ignore */ }; resolve({ success: false, error: 'タイムアウト' }) }, 8000)
+    } catch (e) {
+      resolve({ success: false, error: e.message })
+    }
+  })
+})
+
+// 外部からポートが到達可能か確認（ifconfig.co 利用 - アプリを動かしているマシンのポートを外部チェック）
+ipcMain.handle('diag-check-port-external', async (_, { port }) => {
+  const { net } = await import('electron')
+  return new Promise((resolve) => {
+    // ifconfig.co/port/{port} はリクエスト元IPのポートが開放されているかを外部からTCP確認する
+    const url = `https://ifconfig.co/port/${port}`
+    const req = net.request({ url, headers: { 'User-Agent': 'nexus-mc/1.0', 'Accept': 'application/json' } })
+    let d = ''
+    req.on('response', r => {
+      r.on('data', c => { d += c })
+      r.on('end', () => {
+        try {
+          const json = JSON.parse(d)
+          // {"ip": "x.x.x.x", "port": 25565, "reachable": true/false}
+          resolve({ success: true, reachable: json.reachable === true, ip: json.ip, port: json.port })
+        } catch { resolve({ success: false, error: 'レスポンス解析エラー' }) }
+      })
+    })
+    req.on('error', (e) => resolve({ success: false, error: e.message }))
+    req.setTimeout(20000)
+    req.end()
+  })
+})
+
+// UPnP ポートを閉鎖
+ipcMain.handle('diag-upnp-close-port', async (_, { port, protocol }) => {
+  return new Promise((resolve) => {
+    try {
+      const natUpnp = require('nat-upnp')
+      const client = natUpnp.createClient()
+      client.portUnmapping({
+        public: parseInt(port),
+        protocol: (protocol || 'tcp').toUpperCase()
+      }, (err) => {
+        client.close()
+        if (err) resolve({ success: false, error: err.message })
+        else resolve({ success: true })
+      })
+      setTimeout(() => { try { client.close() } catch { /* ignore */ }; resolve({ success: false, error: 'タイムアウト' }) }, 8000)
+    } catch (e) {
+      resolve({ success: false, error: e.message })
+    }
+  })
+})
+
+// UPnP で現在マッピングされているポート一覧を取得
+ipcMain.handle('diag-upnp-list-mapped', () => {
+  return new Promise((resolve) => {
+    try {
+      const natUpnp = require('nat-upnp')
+      const client = natUpnp.createClient()
+      client.getMappings({ local: false }, (err, results) => {
+        client.close()
+        if (err || !results) return resolve([])
+        resolve(results.map(r => ({
+          port: typeof r.public === 'object' ? r.public.port : r.public,
+          protocol: (r.protocol || 'tcp').toLowerCase(),
+          description: r.description || ''
+        })))
+      })
+      setTimeout(() => { try { client.close() } catch { /* ignore */ }; resolve([]) }, 6000)
+    } catch { resolve([]) }
+  })
+})
+
 // ─── OP Management ───────────────────────────────────────────────────────────
 
 ipcMain.handle('get-ops', async (_, { serverDir }) => {
@@ -1805,5 +2107,270 @@ ipcMain.handle('write-config-file', async (_, { filePath, content }) => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
+})
+
+// ─── MariaDB Management ───────────────────────────────────────────────────────
+
+function getDbDirs(baseDir) {
+  const dbBase   = join(baseDir, DB_DIR_NAME)
+  const mariaDir = join(dbBase, 'mariadb')   // binaries
+  const dataDir  = join(dbBase, 'data')       // data directory
+  const mysqldExe = join(mariaDir, 'bin', 'mysqld.exe')
+  const mysqlExe  = join(mariaDir, 'bin', 'mysql.exe')
+  return { dbBase, mariaDir, dataDir, mysqldExe, mysqlExe }
+}
+
+// MariaDB ダウンロード URL を REST API から取得
+async function fetchMariaDbDownloadUrl() {
+  const { net } = await import('electron')
+  const fetchJson = (url) => new Promise((resolve, reject) => {
+    const req = net.request({ url, headers: { 'User-Agent': 'nexus-mc/1.0' } })
+    let d = ''
+    req.on('response', r => { r.on('data', c => { d += c }); r.on('end', () => { try { resolve(JSON.parse(d)) } catch (e) { reject(e) } }) })
+    req.on('error', reject)
+    req.end()
+  })
+  try {
+    // 10.11 LTS の最新バージョンを取得
+    const data = await fetchJson('https://downloads.mariadb.org/rest-api/mariadb/10.11/')
+    const releases = data.releases || {}
+    const versions = Object.keys(releases).sort((a, b) => {
+      const ap = a.split('.').map(Number), bp = b.split('.').map(Number)
+      for (let i = 0; i < 3; i++) { const d = (bp[i]||0) - (ap[i]||0); if (d !== 0) return d }
+      return 0
+    })
+    for (const ver of versions) {
+      const files = releases[ver]?.files || []
+      const zipFile = files.find(f => f.package_type === 'ZIP' && f.os === 'Windows' && f.cpu === 'x86_64')
+      if (zipFile?.file_download_url) return { url: zipFile.file_download_url, version: ver }
+    }
+  } catch { /* ignore, use fallback */ }
+  return { url: 'https://downloads.mariadb.com/MariaDB/mariadb-10.11.11/winx64-packages/mariadb-10.11.11-winx64.zip', version: '10.11.11' }
+}
+
+// MariaDB インストール（DL → 展開 → 初期化 → パスワード設定）
+ipcMain.handle('db-install', async (_, { baseDir, password }) => {
+  const { net } = await import('electron')
+  const fs = require('fs')
+  const { dbBase, mariaDir, dataDir, mysqldExe } = getDbDirs(baseDir)
+  const send = (msg) => mainWindow?.webContents.send('db-install-log', msg)
+
+  try {
+    mkdirSync(dbBase, { recursive: true })
+    send('MariaDB のダウンロード情報を取得中...')
+    const { url, version } = await fetchMariaDbDownloadUrl()
+    send(`MariaDB ${version} をダウンロード中...（数分かかります）`)
+
+    const zipPath = join(dbBase, `mariadb-${version}-winx64.zip`)
+    // ダウンロード
+    await new Promise((resolve, reject) => {
+      const req = net.request(url)
+      req.on('response', r => {
+        const total = parseInt(r.headers['content-length'] || '0')
+        let received = 0
+        const file = fs.createWriteStream(zipPath)
+        r.on('data', c => {
+          file.write(c)
+          received += c.length
+          if (total) mainWindow?.webContents.send('db-install-progress', { percent: Math.floor(received / total * 100) })
+        })
+        r.on('end', () => { file.close(); resolve() })
+        r.on('error', reject)
+      })
+      req.on('error', reject)
+      req.end()
+    })
+
+    send('展開中...')
+    if (existsSync(mariaDir)) rmSync(mariaDir, { recursive: true, force: true })
+    mkdirSync(mariaDir, { recursive: true })
+    await new Promise((resolve, reject) => {
+      const ps = spawn('powershell', [
+        '-NoProfile', '-NonInteractive', '-Command',
+        `Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${mariaDir}' -Force`
+      ])
+      ps.on('close', code => code === 0 ? resolve() : reject(new Error('展開に失敗')))
+      ps.on('error', reject)
+    })
+    // 展開後のサブフォルダを mariaDir 直下に移動（mariadb-x.x.x-winx64/bin/mysqld.exe → mariaDir/bin/mysqld.exe）
+    const inner = readdirSync(mariaDir).find(n => existsSync(join(mariaDir, n, 'bin', 'mysqld.exe')))
+    if (!inner) throw new Error('mysqld.exe が見つかりません')
+    const innerPath = join(mariaDir, inner)
+    for (const entry of readdirSync(innerPath)) {
+      const src = join(innerPath, entry), dst = join(mariaDir, entry)
+      if (!existsSync(dst)) {
+        try { fs.renameSync(src, dst) } catch { /* ignore */ }
+      }
+    }
+    try { rmSync(innerPath, { recursive: true, force: true }) } catch { /* ignore */ }
+    try { unlinkSync(zipPath) } catch { /* ignore */ }
+
+    send('データベースを初期化中...')
+    mkdirSync(dataDir, { recursive: true })
+    await new Promise((resolve, reject) => {
+      const initProc = spawn(join(mariaDir, 'bin', 'mysqld.exe'), [
+        `--datadir=${dataDir}`,
+        '--initialize-insecure',
+        '--user=root'
+      ], { cwd: join(mariaDir, 'bin') })
+      initProc.on('close', code => resolve(code))
+      initProc.on('error', reject)
+    })
+
+    // 設定保存
+    const settings = loadSettings()
+    settings.db = { installed: true, password, port: 3306, dataDir, binDir: join(mariaDir, 'bin') }
+    saveSettings(settings)
+
+    send(`MariaDB ${version} のインストール完了！`)
+    mainWindow?.webContents.send('db-install-done', { success: true })
+    return { success: true }
+  } catch (e) {
+    send(`エラー: ${e.message}`)
+    mainWindow?.webContents.send('db-install-done', { success: false })
+    return { success: false, error: e.message }
+  }
+})
+
+// MariaDB 起動
+ipcMain.handle('db-start', async (_, { baseDir }) => {
+  if (dbProcess) return { success: true, alreadyRunning: true }
+  const settings = loadSettings()
+  const db = settings.db
+  if (!db?.installed) return { success: false, error: 'MariaDB がインストールされていません' }
+
+  const { dataDir, mysqldExe } = getDbDirs(baseDir)
+  const binDir = db.binDir || join(baseDir, DB_DIR_NAME, 'mariadb', 'bin')
+  const exe = existsSync(mysqldExe) ? mysqldExe : join(binDir, 'mysqld.exe')
+
+  return new Promise((resolve) => {
+    const proc = spawn(exe, [
+      `--datadir=${db.dataDir || dataDir}`,
+      `--port=${db.port || 3306}`,
+      '--bind-address=127.0.0.1',
+      '--console'
+    ], { cwd: binDir })
+    dbProcess = proc
+    let started = false
+    const checkReady = (msg) => {
+      if (!started && (msg.includes('ready for connections') || msg.includes('socket created'))) {
+        started = true
+        mainWindow?.webContents.send('db-status-changed', { running: true })
+        resolve({ success: true })
+      }
+    }
+    proc.stdout.setEncoding('utf8'); proc.stderr.setEncoding('utf8')
+    proc.stdout.on('data', checkReady); proc.stderr.on('data', checkReady)
+    proc.on('close', () => {
+      dbProcess = null
+      mainWindow?.webContents.send('db-status-changed', { running: false })
+    })
+    proc.on('error', (e) => {
+      dbProcess = null
+      if (!started) resolve({ success: false, error: e.message })
+    })
+    // 10秒でタイムアウト（起動完了メッセージが来なくても続行）
+    setTimeout(() => {
+      if (!started) { started = true; resolve({ success: true, timedOut: true }) }
+    }, 10000)
+  })
+})
+
+// MariaDB 停止
+ipcMain.handle('db-stop', () => {
+  if (!dbProcess) return false
+  try { dbProcess.kill(); dbProcess = null } catch { /* ignore */ }
+  mainWindow?.webContents.send('db-status-changed', { running: false })
+  return true
+})
+
+// MariaDB 稼働状態
+ipcMain.handle('db-status', () => ({ running: !!dbProcess }))
+
+// MariaDB インストール確認
+ipcMain.handle('db-check-install', (_, { baseDir }) => {
+  const { mysqldExe } = getDbDirs(baseDir)
+  const settings = loadSettings()
+  return { installed: existsSync(mysqldExe), hasSettings: !!settings.db?.installed }
+})
+
+// クラスター用 DB スキーマ作成
+ipcMain.handle('db-create-schema', async (_, { clusterName }) => {
+  if (!dbProcess) return { success: false, error: 'DB が起動していません' }
+  const settings = loadSettings()
+  const db = settings.db
+  if (!db) return { success: false, error: 'DB 設定がありません' }
+  try {
+    const mysql = require('mysql2/promise')
+    const conn = await mysql.createConnection({
+      host: '127.0.0.1', port: db.port || 3306,
+      user: 'root', password: db.password
+    })
+    const schemaName = `${clusterName}_DB`.replace(/[^a-zA-Z0-9_]/g, '_')
+    await conn.execute(`CREATE DATABASE IF NOT EXISTS \`${schemaName}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`)
+    await conn.end()
+    return { success: true, schemaName }
+  } catch (e) {
+    return { success: false, error: e.message }
+  }
+})
+
+// MariaDB 削除（2段階警告はUI側で実装）
+ipcMain.handle('db-delete', async (_, { baseDir }) => {
+  const runningServers = Object.keys(processes).filter(k => !k.startsWith('velocity-'))
+  if (runningServers.length > 0) return { success: false, error: 'サーバーが起動中です' }
+  if (dbProcess) {
+    try { dbProcess.kill(); dbProcess = null } catch { /* ignore */ }
+    await new Promise(r => setTimeout(r, 1500))
+  }
+  const { dbBase } = getDbDirs(baseDir)
+  try {
+    if (existsSync(dbBase)) rmSync(dbBase, { recursive: true, force: true })
+    const settings = loadSettings()
+    delete settings.db
+    saveSettings(settings)
+    return { success: true }
+  } catch (e) {
+    return { success: false, error: e.message }
+  }
+})
+
+// DB パスワード取得（設定画面向け）
+ipcMain.handle('db-get-settings', () => {
+  const settings = loadSettings()
+  return settings.db || null
+})
+
+// ─── 終了ブロック: DBが動いていてサーバーが起動中なら終了を阻止 ───────────────
+app.on('before-quit', (event) => {
+  if (!dbProcess) return
+  const runningServerIds = Object.keys(processes).filter(k => !k.startsWith('velocity-'))
+  if (runningServerIds.length === 0) {
+    // DBを先に停止してから終了
+    if (dbProcess) {
+      try { dbProcess.kill() } catch { /* ignore */ }
+      dbProcess = null
+    }
+    return
+  }
+  event.preventDefault()
+  const data = loadData()
+  const names = runningServerIds.map(id => {
+    for (const cluster of data.clusters || []) {
+      const srv = (cluster.servers || []).find(s => s.id === id)
+      if (srv) return `${cluster.name} > ${srv.name}`
+    }
+    for (const sv of data.standalone || []) {
+      if (sv.id === id) return sv.name
+    }
+    return id
+  })
+  dialog.showMessageBox(mainWindow, {
+    type: 'warning',
+    buttons: ['OK'],
+    title: '終了できません',
+    message: '起動中のサーバーがあるため終了できません',
+    detail: names.map(n => `・${n}`).join('\n')
+  })
 })
 

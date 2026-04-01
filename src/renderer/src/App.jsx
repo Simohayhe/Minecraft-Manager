@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import ServerList from './components/ServerList'
 import ModManager from './components/ModManager'
 import Settings from './components/Settings'
+import Diagnostics from './components/Diagnostics'
 import './assets/main.css'
 
 function App() {
@@ -57,6 +58,12 @@ function App() {
         >
           ⚙ 設定
         </button>
+        <button
+          className={`sidebar-btn ${page === 'diagnostics' ? 'active' : ''}`}
+          onClick={() => setPage('diagnostics')}
+        >
+          🔍 診断
+        </button>
         <div className="sidebar-spacer" />
         <button className="theme-toggle" onClick={() => setDark((d) => !d)}>
           {dark ? '☀ ライトモード' : '🌙 ダークモード'}
@@ -90,6 +97,7 @@ function App() {
           {page === 'servers' && <ServerList />}
           {page === 'mods' && <ModManager />}
           {page === 'settings' && <Settings />}
+          {page === 'diagnostics' && <Diagnostics />}
         </div>
       </div>
     </div>

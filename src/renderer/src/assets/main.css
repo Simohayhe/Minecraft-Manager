@@ -652,3 +652,392 @@ body {
   padding: 4px 8px;
   font-size: 12px;
 }
+
+/* ─── ログ テキスト選択可能 ─────────────────────────────── */
+.log-area, .console-output, .server-log, pre.log, .log-wrap, .log-box {
+  user-select: text !important;
+  cursor: text;
+}
+
+/* ─── Diagnostics ────────────────────────────────────── */
+.diag-root {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  max-width: 800px;
+}
+
+.diag-title {
+  font-size: 18px;
+  font-weight: 800;
+  color: var(--text);
+  margin: 0 0 4px;
+}
+
+.diag-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 20px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-shadow: var(--shadow-card);
+}
+
+.diag-card-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 10px;
+  margin-bottom: 4px;
+}
+
+/* 信号機行 */
+.diag-signals {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.diag-signal-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  border-radius: 10px;
+  border: 1px solid;
+  transition: background 0.2s;
+}
+
+.diag-signal-dot {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  transition: background 0.3s, box-shadow 0.3s;
+}
+
+.diag-signal-dot[data-loading='true'] {
+  animation: diag-pulse 1s ease-in-out infinite;
+}
+
+@keyframes diag-pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.3; }
+}
+
+.diag-signal-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-2);
+  min-width: 160px;
+}
+
+.diag-signal-value {
+  font-size: 13px;
+  color: var(--text);
+  font-family: monospace;
+  flex: 1;
+}
+
+.diag-copy-btn {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  color: var(--text-accent);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.diag-copy-btn:hover { background: var(--bg-hover); }
+
+.diag-mini-btn {
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 6px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-strong);
+  color: var(--text-accent);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.diag-mini-btn:hover { background: var(--bg-hover); }
+.diag-mini-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* 全チェック判定バー */
+.diag-summary {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px;
+  border-radius: 10px;
+  font-size: 14px;
+  font-weight: 700;
+  margin-top: 4px;
+}
+.diag-summary--ok {
+  background: rgba(34,197,94,0.1);
+  color: #15803d;
+  border: 1px solid rgba(34,197,94,0.3);
+}
+[data-theme='dark'] .diag-summary--ok { color: #86efac; }
+.diag-summary--ng {
+  background: rgba(239,68,68,0.08);
+  color: #991b1b;
+  border: 1px solid rgba(239,68,68,0.2);
+}
+[data-theme='dark'] .diag-summary--ng { color: #fca5a5; }
+
+/* ポート確認 */
+.diag-port-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.diag-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-2);
+  min-width: 100px;
+}
+
+.diag-input {
+  padding: 7px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-input);
+  color: var(--text);
+  font-size: 13px;
+  width: 120px;
+}
+
+.diag-port-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* ボタン */
+.diag-btn {
+  padding: 8px 16px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: all 0.15s;
+}
+.diag-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.diag-btn--primary {
+  background: linear-gradient(135deg, var(--text-accent), var(--text-accent-2));
+  color: #fff;
+}
+.diag-btn--primary:hover:not(:disabled) { filter: brightness(1.1); }
+.diag-btn--secondary {
+  background: var(--bg-section);
+  border-color: var(--border-strong);
+  color: var(--text-accent);
+}
+.diag-btn--secondary:hover:not(:disabled) { background: var(--bg-hover); }
+.diag-btn--ghost {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--text-muted);
+}
+.diag-btn--ghost:hover:not(:disabled) { background: var(--bg-hover); color: var(--text); }
+.diag-btn--danger {
+  background: rgba(239,68,68,0.12);
+  border-color: rgba(239,68,68,0.3);
+  color: #dc2626;
+}
+.diag-btn--danger:hover:not(:disabled) { background: rgba(239,68,68,0.2); }
+[data-theme='dark'] .diag-btn--danger { color: #fca5a5; }
+
+/* メッセージボックス */
+.diag-msg {
+  padding: 9px 14px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 500;
+}
+.diag-msg--ok    { background: rgba(34,197,94,0.08);  border: 1px solid rgba(34,197,94,0.2);  color: #166534; }
+.diag-msg--error { background: rgba(239,68,68,0.08);  border: 1px solid rgba(239,68,68,0.2);  color: #991b1b; }
+.diag-msg--warn  { background: rgba(234,179,8,0.08);  border: 1px solid rgba(234,179,8,0.2);  color: #713f12; }
+.diag-msg--info  { background: rgba(65,90,200,0.06);  border: 1px solid var(--border);         color: var(--text-accent); }
+[data-theme='dark'] .diag-msg--ok    { color: #86efac; }
+[data-theme='dark'] .diag-msg--error { color: #fca5a5; }
+[data-theme='dark'] .diag-msg--warn  { color: #fde68a; }
+
+/* MariaDB 管理 */
+.diag-note  { font-size: 11px; color: var(--text-muted); margin: 0; }
+.diag-muted { color: var(--text-muted); font-size: 12px; }
+.diag-green { color: #22c55e; font-weight: 700; }
+.diag-red   { color: #ef4444; font-weight: 700; }
+[data-theme='dark'] .diag-green { color: #4ade80; }
+[data-theme='dark'] .diag-red   { color: #f87171; }
+
+.diag-warn-text { font-size: 12px; color: #b45309; font-weight: 600; }
+[data-theme='dark'] .diag-warn-text { color: #fde68a; }
+
+.diag-db-info-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: var(--bg-section);
+  border-radius: 8px;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+}
+.diag-db-info-row {
+  display: flex;
+  gap: 16px;
+  font-size: 12px;
+}
+.diag-db-info-row > span:first-child {
+  min-width: 90px;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.diag-db-info-row > span:last-child {
+  color: var(--text);
+  font-family: monospace;
+}
+
+.diag-db-actions, .diag-db-install {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.diag-delete-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border-radius: 10px;
+  background: rgba(239,68,68,0.05);
+  border: 1px solid rgba(239,68,68,0.2);
+}
+
+.diag-progress-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.diag-progress-bar {
+  flex: 1;
+  height: 6px;
+  background: var(--bg-section);
+  border-radius: 999px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.diag-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--text-accent), var(--text-accent-2));
+  border-radius: 999px;
+  transition: width 0.3s;
+}
+
+.diag-log {
+  background: var(--bg-log);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-family: monospace;
+  font-size: 11px;
+  color: #a0c4a0;
+  max-height: 150px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  user-select: text;
+  cursor: text;
+}
+
+/* ─── ポート管理 (Settings) ──────────────────────────────── */
+.port-group-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 6px;
+  padding-left: 4px;
+}
+
+.port-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.port-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: var(--bg-section);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  flex-wrap: wrap;
+}
+
+.port-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.port-dot[data-loading='true'] {
+  animation: diag-pulse 1s ease-in-out infinite;
+}
+
+.port-name {
+  font-size: 13px;
+  color: var(--text);
+  font-weight: 500;
+  flex: 1;
+  min-width: 140px;
+}
+
+.port-num {
+  font-size: 12px;
+  font-family: monospace;
+  color: var(--text-accent);
+  background: var(--bg-tag-blue);
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-weight: 700;
+}
+
+.port-state-label {
+  font-size: 11px;
+  font-weight: 600;
+  min-width: 60px;
+}
+
+.port-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.port-ext-result {
+  font-size: 11px;
+  font-weight: 600;
+  margin-left: 4px;
+}
+
+.diag-mini-btn--close {
+  color: #ef4444;
+  border-color: rgba(239,68,68,0.3);
+}
+.diag-mini-btn--close:hover:not(:disabled) {
+  background: rgba(239,68,68,0.08);
+}

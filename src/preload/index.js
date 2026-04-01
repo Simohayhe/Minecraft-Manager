@@ -79,6 +79,32 @@ const api = {
   onUpdateDownloaded: (cb) => ipcRenderer.on('update-downloaded', (_, info) => cb(info)),
   onUpdateError: (cb) => ipcRenderer.on('update-error', (_, info) => cb(info)),
   installUpdate: () => ipcRenderer.invoke('install-update'),
+
+  // ─── MariaDB ──────────────────────────────────────────────────────────────
+  dbInstall: (opts) => ipcRenderer.invoke('db-install', opts),
+  dbStart: (opts) => ipcRenderer.invoke('db-start', opts),
+  dbStop: () => ipcRenderer.invoke('db-stop'),
+  dbStatus: () => ipcRenderer.invoke('db-status'),
+  dbCheckInstall: (opts) => ipcRenderer.invoke('db-check-install', opts),
+  dbCreateSchema: (opts) => ipcRenderer.invoke('db-create-schema', opts),
+  dbDelete: (opts) => ipcRenderer.invoke('db-delete', opts),
+  dbGetSettings: () => ipcRenderer.invoke('db-get-settings'),
+  onDbInstallLog: (cb) => ipcRenderer.on('db-install-log', (_, msg) => cb(msg)),
+  onDbInstallProgress: (cb) => ipcRenderer.on('db-install-progress', (_, info) => cb(info)),
+  onDbInstallDone: (cb) => ipcRenderer.on('db-install-done', (_, info) => cb(info)),
+  onDbStatusChanged: (cb) => ipcRenderer.on('db-status-changed', (_, info) => cb(info)),
+
+  // ─── Diagnostics ─────────────────────────────────────────────────────────
+  getLocalIp: () => ipcRenderer.invoke('get-local-ip'),
+  diagUpnpOpenPort: (opts) => ipcRenderer.invoke('diag-upnp-open-port', opts),
+  diagUpnpClosePort: (opts) => ipcRenderer.invoke('diag-upnp-close-port', opts),
+  diagUpnpListMapped: () => ipcRenderer.invoke('diag-upnp-list-mapped'),
+  diagCheckPortExternal: (opts) => ipcRenderer.invoke('diag-check-port-external', opts),
+
+  // ─── 必須Mod / ライブラリ ───────────────────────────────────────────────
+  checkRequiredMods: (opts) => ipcRenderer.invoke('check-required-mods', opts),
+  repairRequiredMods: (opts) => ipcRenderer.invoke('repair-required-mods', opts),
+  ensureModSourceFolder: (opts) => ipcRenderer.invoke('ensure-mod-source-folder', opts),
 }
 
 if (process.contextIsolated) {
