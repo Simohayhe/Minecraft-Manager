@@ -2010,6 +2010,78 @@ ipcMain.handle('diag-upnp-list-mapped', () => {
   })
 })
 
+// UPnP が利用可能かどうかを確認（ルーターへの疎通テスト）
+ipcMain.handle('diag-upnp-check', () => {
+  return new Promise((resolve) => {
+    try {
+      const natUpnp = require('nat-upnp')
+      const client = natUpnp.createClient()
+      client.getMappings((err, results) => {
+        client.close()
+        if (err) resolve({ available: false, error: err.message })
+        else resolve({ available: true, mappingCount: (results || []).length })
+      })
+      setTimeout(() => {
+        try { client.close() } catch { /* ignore */ }
+        resolve({ available: false, error: 'ルーターから応答がありません（UPnP未対応の可能性）' })
+      }, 8000)
+    } catch (e) {
+      resolve({ available: false, error: e.message })
+    }
+  })
+})
+
+// 全サーバーのポート情報を正確に取得（velocity.toml / server.properties 直読み）
+ipcMain.handle('get-all-server-ports', () => {
+  const data = loadData()
+  const settings = loadSettings()
+  const baseDir = settings.baseDir || ''
+  const result = { clusters: [], standalone: [] }
+
+  for (const cluster of data.clusters || []) {
+    // Velocity ポートは cluster.velocity.port に格納されている
+    let velocityPort = cluster.velocity?.port || 25577
+    // velocity.toml から直接読んでより正確な値を取得
+    if (baseDir && cluster.name) {
+      const tomlPath = join(baseDir, cluster.name, 'velocity', 'velocity.toml')
+      if (existsSync(tomlPath)) {
+        try {
+          const toml = readFileSync(tomlPath, 'utf-8')
+          const m = toml.match(/^bind\s*=\s*"[^:]*:(\d+)"/m)
+          if (m) velocityPort = parseInt(m[1])
+        } catch { /* ignore */ }
+      }
+    }
+
+    const clusterResult = { id: cluster.id, name: cluster.name, velocityPort, servers: [] }
+
+    for (const server of cluster.servers || []) {
+      let port = server.port || 25565
+      if (server.serverDir && existsSync(join(server.serverDir, 'server.properties'))) {
+        try {
+          const m = readFileSync(join(server.serverDir, 'server.properties'), 'utf-8').match(/^server-port=(\d+)$/m)
+          if (m) port = parseInt(m[1])
+        } catch { /* ignore */ }
+      }
+      clusterResult.servers.push({ id: server.id, name: server.name, port })
+    }
+    result.clusters.push(clusterResult)
+  }
+
+  for (const server of data.standalone || []) {
+    let port = server.port || 25565
+    if (server.serverDir && existsSync(join(server.serverDir, 'server.properties'))) {
+      try {
+        const m = readFileSync(join(server.serverDir, 'server.properties'), 'utf-8').match(/^server-port=(\d+)$/m)
+        if (m) port = parseInt(m[1])
+      } catch { /* ignore */ }
+    }
+    result.standalone.push({ id: server.id, name: server.name, port })
+  }
+
+  return result
+})
+
 // ─── OP Management ───────────────────────────────────────────────────────────
 
 ipcMain.handle('get-ops', async (_, { serverDir }) => {

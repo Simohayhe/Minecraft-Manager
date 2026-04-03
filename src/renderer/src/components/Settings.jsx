@@ -37,17 +37,18 @@ function JavaSection() {
   }, [])
 
   useEffect(() => {
-    window.api.onJavaInstallLog(msg => {
+    const u1 = window.api.onJavaInstallLog(msg => {
       setInstallLog(prev => prev + msg + '\n')
       if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight
     })
-    window.api.onJavaInstallProgress(({ majorVersion, percent }) => {
+    const u2 = window.api.onJavaInstallProgress(({ majorVersion, percent }) => {
       if (installing === majorVersion || installing == null) setInstallProgress(percent)
     })
-    window.api.onJavaInstallDone(({ majorVersion, path }) => {
+    const u3 = window.api.onJavaInstallDone(({ majorVersion, path }) => {
       setInstalling(null); setInstallProgress(0)
       mergeInstallation({ path, majorVersion, source: 'managed' })
     })
+    return () => { u1(); u2(); u3() }
   }, [installing])
 
   const mergeInstallation = (entry) => {
@@ -223,13 +224,14 @@ function DbSection({ baseDir }) {
 
   useEffect(() => {
     load()
-    window.api.onDbStatusChanged((info) => setDbRunning(info.running))
-    window.api.onDbInstallLog((msg) => setDbInstallLog(prev => [...prev, msg]))
-    window.api.onDbInstallProgress((info) => setDbInstallPct(info.percent || 0))
-    window.api.onDbInstallDone((info) => {
+    const u1 = window.api.onDbStatusChanged((info) => setDbRunning(info.running))
+    const u2 = window.api.onDbInstallLog((msg) => setDbInstallLog(prev => [...prev, msg]))
+    const u3 = window.api.onDbInstallProgress((info) => setDbInstallPct(info.percent || 0))
+    const u4 = window.api.onDbInstallDone((info) => {
       setDbInstalling(false)
       if (info.success) { setDbInstalled(true); load() }
     })
+    return () => { u1(); u2(); u3(); u4() }
   }, [load])
 
   const startInstall = async () => {
@@ -339,7 +341,7 @@ function DbSection({ baseDir }) {
 // ─── ポート開放管理セクション ────────────────────────────────────────────────
 const PORT_STATE = { UNKNOWN: 'unknown', OPEN: 'open', CLOSED: 'closed', LOADING: 'loading', ERROR: 'error' }
 
-function PortRow({ label, port, state, onOpen, onClose, onExtCheck, extResult }) {
+function PortRow({ label, port, state, onOpen, onClose }) {
   const dot = {
     [PORT_STATE.OPEN]:    { color: '#22c55e', label: '開放済み' },
     [PORT_STATE.CLOSED]:  { color: '#ef4444', label: '未開放' },
@@ -359,65 +361,60 @@ function PortRow({ label, port, state, onOpen, onClose, onExtCheck, extResult })
         {state !== PORT_STATE.OPEN
           ? <button className="diag-mini-btn" onClick={onOpen} disabled={state === PORT_STATE.LOADING}>📡 開放</button>
           : <button className="diag-mini-btn diag-mini-btn--close" onClick={onClose} disabled={state === PORT_STATE.LOADING}>✕ 閉鎖</button>}
-        <button className="diag-mini-btn" onClick={onExtCheck} disabled={state === PORT_STATE.LOADING} title="外部から到達確認">🌐</button>
       </div>
-      {extResult && (
-        <span className="port-ext-result" style={{ color: extResult.ok ? '#22c55e' : '#ef4444' }}>
-          {extResult.ok ? '✓ 外部到達OK' : '✗ 外部到達NG'}
-        </span>
-      )}
     </div>
   )
 }
 
 function PortSection() {
-  const [data, setData]               = useState(null)
+  const [allPorts, setAllPorts]       = useState(null)   // { clusters, standalone }
   const [mappedPorts, setMappedPorts] = useState([])     // UPnP で開いてるポート番号の配列
   const [portStates, setPortStates]   = useState({})     // { port: PORT_STATE }
-  const [extResults, setExtResults]   = useState({})     // { port: { ok: bool } }
   const [loadingMapped, setLoadingMapped] = useState(false)
 
-  const loadData = useCallback(async () => {
-    const d = await window.api.loadData()
-    setData(d)
+  const loadPorts = useCallback(async () => {
+    const d = await window.api.getAllServerPorts()
+    setAllPorts(d)
+    return d
   }, [])
 
-  const loadMapped = useCallback(async () => {
+  const loadMapped = useCallback(async (portsData) => {
     setLoadingMapped(true)
     const mapped = await window.api.diagUpnpListMapped()
-    const ports = mapped.map(m => m.port)
-    setMappedPorts(ports)
+    const openNums = mapped.map(m => m.port)
+    setMappedPorts(openNums)
     // ポート状態を一括更新
     setPortStates(prev => {
       const next = { ...prev }
-      // 全既知ポートを "closed" or "open" に設定
-      if (data) {
-        getAllPorts(data).forEach(({ port }) => {
+      const src = portsData || allPorts
+      if (src) {
+        getFlatPorts(src).forEach(({ port }) => {
           if (next[port] === PORT_STATE.LOADING) return
-          next[port] = ports.includes(port) ? PORT_STATE.OPEN : PORT_STATE.CLOSED
+          next[port] = openNums.includes(port) ? PORT_STATE.OPEN : PORT_STATE.CLOSED
         })
       }
       return next
     })
     setLoadingMapped(false)
-  }, [data])
+  }, [allPorts])
 
-  useEffect(() => { loadData() }, [loadData])
-  useEffect(() => { if (data) loadMapped() }, [data]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    loadPorts().then(d => loadMapped(d))
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // データから全ポート一覧を生成
-  const getAllPorts = (d) => {
+  // フラットなポート一覧 { key, label, port, group }
+  const getFlatPorts = (d) => {
     const ports = []
     for (const cluster of d?.clusters || []) {
-      // Velocity ポート
-      const vPort = cluster.velocityConfig?.port || cluster.velocityPort || 25577
-      ports.push({ key: `vel-${cluster.id}`, label: `${cluster.name}  (Velocity)`, port: vPort, group: 'cluster', clusterName: cluster.name })
+      if (cluster.velocityPort) {
+        ports.push({ key: `vel-${cluster.id}`, label: `${cluster.name}  (Velocity)`, port: cluster.velocityPort, group: 'cluster' })
+      }
       for (const srv of cluster.servers || []) {
-        ports.push({ key: srv.id, label: `${cluster.name}  >  ${srv.name}`, port: srv.port, group: 'cluster', clusterName: cluster.name })
+        if (srv.port) ports.push({ key: srv.id, label: `${cluster.name}  >  ${srv.name}`, port: srv.port, group: 'cluster' })
       }
     }
     for (const srv of d?.standalone || []) {
-      ports.push({ key: srv.id, label: srv.name, port: srv.port, group: 'standalone' })
+      if (srv.port) ports.push({ key: srv.id, label: srv.name, port: srv.port, group: 'standalone' })
     }
     return ports
   }
@@ -446,18 +443,11 @@ function PortSection() {
     }
   }
 
-  const checkExt = async (port) => {
-    setPortState(port, PORT_STATE.LOADING)
-    const res = await window.api.diagCheckPortExternal({ port })
-    setPortState(port, mappedPorts.includes(port) ? PORT_STATE.OPEN : PORT_STATE.CLOSED)
-    setExtResults(prev => ({ ...prev, [port]: { ok: res.success && res.reachable } }))
-  }
+  if (!allPorts) return <div style={{ fontSize: 13, color: 'var(--text-muted)', padding: '8px 0' }}>読み込み中...</div>
 
-  if (!data) return <div style={{ fontSize: 13, color: 'var(--text-muted)', padding: '8px 0' }}>読み込み中...</div>
-
-  const allPorts = getAllPorts(data)
-  const clusterPorts    = allPorts.filter(p => p.group === 'cluster')
-  const standalonePorts = allPorts.filter(p => p.group === 'standalone')
+  const flat = getFlatPorts(allPorts)
+  const clusterPorts    = flat.filter(p => p.group === 'cluster')
+  const standalonePorts = flat.filter(p => p.group === 'standalone')
 
   const renderRows = (ports) => ports.map(({ key, label, port }) => (
     <PortRow
@@ -467,8 +457,6 @@ function PortSection() {
       state={portStates[port] ?? PORT_STATE.UNKNOWN}
       onOpen={() => openPort(port)}
       onClose={() => closePort(port)}
-      onExtCheck={() => checkExt(port)}
-      extResult={extResults[port]}
     />
   ))
 
@@ -479,12 +467,12 @@ function PortSection() {
           <div className="settings-label" style={{ marginBottom: 2 }}>🔓 ポート開放管理</div>
           <div className="settings-description">UPnP でルーターのポートを開閉できます</div>
         </div>
-        <button className="btn btn-restart" onClick={loadMapped} disabled={loadingMapped} style={{ minWidth: 110 }}>
+        <button className="btn btn-restart" onClick={() => loadMapped(null)} disabled={loadingMapped} style={{ minWidth: 110 }}>
           {loadingMapped ? '確認中...' : '🔄 状態を更新'}
         </button>
       </div>
 
-      {allPorts.length === 0 ? (
+      {flat.length === 0 ? (
         <div style={{ fontSize: 13, color: 'var(--text-muted)', padding: '12px 0' }}>
           サーバーが登録されていません
         </div>
