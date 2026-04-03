@@ -293,36 +293,20 @@ function PropertiesEditor({ properties, onChange, clusterOnly = false, lockedKey
 }
 
 
-function ConfirmModal({ message, onConfirm, onClose, confirmLabel = '削除', confirmClass = 'btn-stop' }) {
+function ConfirmModal({ message, onConfirm, onClose, confirmLabel = '削除', confirmClass = 'btn-stop', checkboxLabel, checkboxChecked, onCheckboxChange }) {
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal" onClick={e => e.stopPropagation()}>
         <div className="modal-title">確認</div>
-        <p style={{ color: 'var(--text-2)', fontSize: 14 }}>{message}</p>
-        <div className="modal-actions">
-          <button className={`btn ${confirmClass}`} onClick={onConfirm}>{confirmLabel}</button>
-          <button className="btn btn-restart" onClick={onClose}>キャンセル</button>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function DeleteConfirmModal({ message, onConfirm, onClose, canDeleteFiles = false }) {
-  const [deleteFiles, setDeleteFiles] = useState(false)
-  return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal" onClick={e => e.stopPropagation()}>
-        <div className="modal-title">削除の確認</div>
-        <p style={{ color: 'var(--text-2)', fontSize: 14 }}>{message}</p>
-        {canDeleteFiles && (
-          <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: 'var(--text-2)', marginBottom: 12, cursor: 'pointer' }}>
-            <input type="checkbox" checked={deleteFiles} onChange={e => setDeleteFiles(e.target.checked)} />
-            実ファイルも削除する（元に戻せません）
+        <p style={{ color: 'var(--text-2)', fontSize: 14, whiteSpace: 'pre-wrap' }}>{message}</p>
+        {checkboxLabel && (
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#ef4444', marginBottom: 12, cursor: 'pointer' }}>
+            <input type="checkbox" checked={!!checkboxChecked} onChange={e => onCheckboxChange && onCheckboxChange(e.target.checked)} />
+            {checkboxLabel}
           </label>
         )}
         <div className="modal-actions">
-          <button className="btn btn-stop" onClick={() => onConfirm({ deleteFiles })}>削除</button>
+          <button className={`btn ${confirmClass}`} onClick={onConfirm}>{confirmLabel}</button>
           <button className="btn btn-restart" onClick={onClose}>キャンセル</button>
         </div>
       </div>
@@ -689,10 +673,6 @@ function AddServerModal({ onAdd, onClose, baseDir, cluster }) {
         enabledMods: [], enabledPlugins: [], individualProperties: null,
         jvmMemory: { value: 2, unit: 'G' }
       }
-      // サーバー名 = ワールド名 (level-name)
-      const existingProps = await window.api.readServerProperties({ serverDir: result.serverDir }) || {}
-      await window.api.writeServerProperties({ serverDir: result.serverDir, properties: { ...existingProps, 'level-name': name.trim() } })
-
       if (cluster?.velocity?.forwardingSecret) {
         if (serverType === 'fabric') {
           await window.api.setupFabricProxy({ serverDir: result.serverDir, mcVersion, forwardingSecret: cluster.velocity.forwardingSecret })
@@ -875,11 +855,18 @@ function ClusterConsole({ cluster, serverLogs, velocityLogs, serverStatuses }) {
             onClick={() => setConsoleTab(s.id)}>{s.name}</button>
         ))}
       </div>
-      <div className="log-box" ref={logRef} style={{ height: 380 }}>
-        {currentLogs.length === 0
-          ? <span style={{ color: 'var(--text-dim)' }}>ログなし</span>
-          : currentLogs.map((l, i) => <div key={i}>{l}</div>)
-        }
+      <div style={{ position: 'relative' }}>
+        <div className="log-box" ref={logRef} style={{ height: 380 }}>
+          {currentLogs.length === 0
+            ? <span style={{ color: 'var(--text-dim)' }}>ログなし</span>
+            : currentLogs.map((l, i) => <div key={i}>{l}</div>)
+          }
+        </div>
+        <button
+          style={{ position: 'absolute', top: 6, right: 6, background: 'rgba(0,0,0,0.4)', border: '1px solid rgba(255,255,255,0.12)', color: '#8ab4c8', fontSize: 11, padding: '2px 8px', borderRadius: 4, cursor: 'pointer' }}
+          onClick={() => navigator.clipboard.writeText(currentLogs.join('\n'))}
+          title="ログをコピー"
+        >📋</button>
       </div>
       {consoleTab !== 'velocity' && serverStatuses[consoleTab] === 'running' && (
         <input className="modal-input" style={{ marginTop: 8, width: '100%' }}
@@ -1013,6 +1000,7 @@ function statusDotClass(s) {
 
 function ServerCard({ server, onClick, onDelete, onUpdatePort, onStart, onStop, onRestart, serverStatus, conflictInfo }) {
   const [showConfirm, setShowConfirm] = useState(false)
+  const [deleteFiles, setDeleteFiles] = useState(false)
   const [editingPort, setEditingPort] = useState(false)
   const [portValue, setPortValue] = useState(String(server.port))
 
@@ -1070,11 +1058,13 @@ function ServerCard({ server, onClick, onDelete, onUpdatePort, onStart, onStop, 
         )}
       </div>
       {showConfirm && (
-        <DeleteConfirmModal
+        <ConfirmModal
           message={`「${server.name}」を削除しますか？`}
-          onConfirm={({ deleteFiles }) => { setShowConfirm(false); onDelete({ deleteFiles }) }}
-          onClose={() => setShowConfirm(false)}
-          canDeleteFiles={!!server.serverDir}
+          onConfirm={() => { setShowConfirm(false); onDelete(deleteFiles) }}
+          onClose={() => { setShowConfirm(false); setDeleteFiles(false) }}
+          checkboxLabel="実ファイルも削除する（元に戻せません）"
+          checkboxChecked={deleteFiles}
+          onCheckboxChange={setDeleteFiles}
         />
       )}
     </div>
@@ -1094,7 +1084,6 @@ function ServerDetail({ server, cluster, onBack, onUpdateServer, serverStatus, o
   const [jvmMemory, setJvmMemory] = useState(server.jvmMemory || { value: 2, unit: 'G' })
   const [javaPath, setJavaPath] = useState(server.javaPath || '')
   const [javaOptions, setJavaOptions] = useState([])
-  const [invsyncToggling, setInvsyncToggling] = useState(false)
 
   useEffect(() => {
     window.api.loadSettings().then(s => {
@@ -1221,13 +1210,23 @@ function ServerDetail({ server, cluster, onBack, onUpdateServer, serverStatus, o
         {server.type === 'paper' && (
           <button className={`tab-btn ${subTab === 'plugins' ? 'active' : ''}`} onClick={() => setSubTab('plugins')}>Plugin</button>
         )}
+        {cluster && (server.type || 'fabric') === 'fabric' && (
+          <button className={`tab-btn ${subTab === 'shared' ? 'active' : ''}`} onClick={() => setSubTab('shared')}>🔗 共有設定</button>
+        )}
       </div>
 
       <div className="tab-content">
         {subTab === 'log' && (
           <div>
-            <div className="log-box" ref={logRef} style={{ height: 400 }}>
-              {logs.length === 0 ? <span style={{ color: 'var(--text-dim)' }}>ログなし</span> : logs.map((l, i) => <div key={i}>{l}</div>)}
+            <div style={{ position: 'relative' }}>
+              <div className="log-box" ref={logRef} style={{ height: 400 }}>
+                {logs.length === 0 ? <span style={{ color: 'var(--text-dim)' }}>ログなし</span> : logs.map((l, i) => <div key={i}>{l}</div>)}
+              </div>
+              <button
+                style={{ position: 'absolute', top: 6, right: 6, background: 'rgba(0,0,0,0.4)', border: '1px solid rgba(255,255,255,0.12)', color: '#8ab4c8', fontSize: 11, padding: '2px 8px', borderRadius: 4, cursor: 'pointer' }}
+                onClick={() => navigator.clipboard.writeText(logs.join('\n'))}
+                title="ログをコピー"
+              >📋</button>
             </div>
             {serverStatus === 'running' && (
               <input className="modal-input" style={{ marginTop: 8, width: '100%' }} placeholder="コマンドを入力してEnter"
@@ -1298,41 +1297,6 @@ function ServerDetail({ server, cluster, onBack, onUpdateServer, serverStatus, o
                 <span style={{ color: 'var(--text-dim)', fontSize: 12 }}>クラッシュ時に自動再起動</span>
               </div>
             </div>
-            {cluster && (server.type || 'fabric') === 'fabric' && (
-              <div style={{ marginBottom: 16, padding: '10px 14px', background: 'var(--bg-card)', borderRadius: 8, border: '1px solid var(--border)' }}>
-                <div className="settings-label" style={{ marginBottom: 4 }}>インベントリ共有</div>
-                <div className="settings-description" style={{ marginBottom: 8 }}>
-                  ONにするとInvsyncがインストールされ、クラスター間でインベントリが同期されます
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                  <button
-                    disabled={invsyncToggling || !server.serverDir}
-                    style={{
-                      padding: '4px 16px', borderRadius: 6, border: 'none', cursor: invsyncToggling ? 'wait' : 'pointer', fontSize: 13, fontWeight: 600,
-                      background: server.invsyncEnabled ? '#4ade80' : 'var(--border)', color: server.invsyncEnabled ? '#000' : 'var(--text-2)',
-                      opacity: invsyncToggling ? 0.6 : 1
-                    }}
-                    onClick={async () => {
-                      if (!server.serverDir) return
-                      const next = !server.invsyncEnabled
-                      setInvsyncToggling(true)
-                      const res = await window.api.toggleInvsync({ serverDir: server.serverDir, enabled: next })
-                      setInvsyncToggling(false)
-                      if (res.success) {
-                        onUpdateServer({ ...server, invsyncEnabled: next })
-                      } else {
-                        alert(`Invsync ${next ? 'インストール' : 'アンインストール'}失敗: ${res.error}`)
-                      }
-                    }}
-                  >
-                    {invsyncToggling ? '処理中...' : server.invsyncEnabled ? 'ON' : 'OFF'}
-                  </button>
-                  <span style={{ color: 'var(--text-dim)', fontSize: 12 }}>
-                    {server.invsyncEnabled ? 'Invsync インストール済み' : 'Invsync 未インストール'}
-                  </span>
-                </div>
-              </div>
-            )}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
               <div>
                 <div className="settings-label">個別設定</div>
@@ -1367,6 +1331,9 @@ function ServerDetail({ server, cluster, onBack, onUpdateServer, serverStatus, o
         {(subTab === 'mods' || subTab === 'plugins') && (
           <ModPluginTab server={server} cluster={cluster} onUpdateServer={onUpdateServer} />
         )}
+        {subTab === 'shared' && cluster && (
+          <InvsyncTab server={server} />
+        )}
       </div>
       {showWorldDeleteConfirm1 && (
         <ConfirmModal
@@ -1391,64 +1358,6 @@ function ServerDetail({ server, cluster, onBack, onUpdateServer, serverStatus, o
           }}
           onClose={() => setShowWorldDeleteConfirm2(false)}
         />
-      )}
-    </div>
-  )
-}
-
-// ─── クラスター DB タブ ──────────────────────────────────────────────────────
-function ClusterDbSection({ cluster }) {
-  const [dbRunning, setDbRunning] = useState(false)
-  const [schemaName, setSchemaName] = useState('')
-  const [creating, setCreating] = useState(false)
-  const [createMsg, setCreateMsg] = useState('')
-
-  useEffect(() => {
-    const safe = cluster.name.replace(/[^a-zA-Z0-9_]/g, '_')
-    setSchemaName(`${safe}_DB`)
-    window.api.dbStatus().then(st => setDbRunning(st.running))
-    const unsub = window.api.onDbStatusChanged(info => setDbRunning(info.running))
-    return () => unsub()
-  }, [cluster.name])
-
-  const createSchema = async () => {
-    setCreating(true); setCreateMsg('')
-    const res = await window.api.dbCreateSchema({ schemaName })
-    setCreating(false)
-    setCreateMsg(res.success ? `✅ スキーマ「${schemaName}」を作成しました` : `❌ ${res.error}`)
-  }
-
-  return (
-    <div style={{ marginTop: 12 }}>
-      <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 10, padding: '14px 16px', marginBottom: 12 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
-          <span style={{ fontWeight: 700, fontSize: 14 }}>🗄 データベース状態</span>
-          <span style={{ fontSize: 13, fontWeight: 700, color: dbRunning ? '#22c55e' : '#ef4444' }}>
-            {dbRunning ? '● 稼働中' : '● 停止中'}
-          </span>
-        </div>
-        {[
-          ['クラスター DB名', schemaName],
-          ['接続先', 'localhost:3306'],
-          ['ユーザー', 'root'],
-        ].map(([k, v]) => (
-          <div key={k} style={{ display: 'flex', gap: 16, fontSize: 12, marginBottom: 4 }}>
-            <span style={{ minWidth: 110, color: 'var(--text-muted)', fontWeight: 600 }}>{k}</span>
-            <span style={{ color: 'var(--text)', fontFamily: 'monospace' }}>{v}</span>
-          </div>
-        ))}
-      </div>
-      {!dbRunning ? (
-        <div style={{ fontSize: 13, color: '#f59e0b', padding: '8px 12px', background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.25)', borderRadius: 8 }}>
-          ⚠ MariaDB が停止中です。設定タブからDBを起動してください。
-        </div>
-      ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          <button className="btn btn-start" style={{ alignSelf: 'flex-start' }} onClick={createSchema} disabled={creating}>
-            {creating ? '作成中...' : `📦 スキーマを作成 / 確認`}
-          </button>
-          {createMsg && <div style={{ fontSize: 12, color: 'var(--text-2)' }}>{createMsg}</div>}
-        </div>
       )}
     </div>
   )
@@ -2044,6 +1953,251 @@ function VelocityPluginTab({ cluster, settings, onUpdateCluster }) {
   )
 }
 
+// ─── 必須Mod 警告モーダル ────────────────────────────────────────────────────
+function RequiredModsWarnModal({ server, cluster, missing, onRepairAndStart, onStartAnyway, onClose }) {
+  const [repairing, setRepairing] = useState(false)
+  const handleRepair = async () => {
+    setRepairing(true)
+    await onRepairAndStart()
+    setRepairing(false)
+  }
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" onClick={e => e.stopPropagation()}>
+        <div className="modal-title">⚠ 必須Modが見つかりません</div>
+        <p style={{ color: 'var(--text-2)', fontSize: 14, marginBottom: 8 }}>
+          {cluster ? `「${cluster.name}」クラスターの` : ''}「{server.name}」のmodsフォルダに以下のModが見つかりませんでした:
+        </p>
+        <ul style={{ margin: '0 0 14px 16px', padding: 0, color: '#ef4444', fontSize: 13 }}>
+          {missing.map(m => <li key={m}>{m}</li>)}
+        </ul>
+        <p style={{ color: 'var(--text-muted)', fontSize: 12, marginBottom: 14 }}>
+          これらのModはクラスター機能に必要です。再インストールしますか？
+        </p>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <button className="btn btn-start" onClick={handleRepair} disabled={repairing}>
+            {repairing ? '修復中...' : '🔧 再インストールして起動'}
+          </button>
+          <button className="btn btn-restart" onClick={onStartAnyway} disabled={repairing}>
+            このまま起動
+          </button>
+          <button className="btn" onClick={onClose} disabled={repairing}
+            style={{ background: 'var(--border)', color: 'var(--text-2)' }}>
+            キャンセル
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── Invsync 共有設定タブ ────────────────────────────────────────────────────
+function InvsyncTab({ server }) {
+  const [versions, setVersions] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [selectedVersion, setSelectedVersion] = useState(null)
+  const [installing, setInstalling] = useState(false)
+  const [installResult, setInstallResult] = useState(null)
+  const [installed, setInstalled] = useState(null) // { installed, fileName }
+
+  useEffect(() => {
+    const init = async () => {
+      setLoading(true)
+      const [vers, status] = await Promise.all([
+        window.api.invsyncListVersions(),
+        server.serverDir ? window.api.invsyncCheck({ serverDir: server.serverDir }) : Promise.resolve({ installed: false })
+      ])
+      setVersions(vers)
+      setInstalled(status)
+      // デフォルト選択: サーバーのMCバージョンと一致するものがあれば選択
+      if (vers.length > 0) {
+        const match = vers.find(v => v.mcVersion === server.mcVersion) || vers[0]
+        setSelectedVersion(match.tag)
+      }
+      setLoading(false)
+    }
+    init()
+  }, [server.id])
+
+  const handleInstall = async () => {
+    if (!selectedVersion || !server.serverDir) return
+    const ver = versions.find(v => v.tag === selectedVersion)
+    if (!ver) return
+    setInstalling(true)
+    setInstallResult(null)
+    const res = await window.api.invsyncInstall({
+      serverDir: server.serverDir,
+      downloadUrl: ver.downloadUrl,
+      fileName: ver.fileName,
+    })
+    setInstallResult(res)
+    if (res.success) {
+      const status = await window.api.invsyncCheck({ serverDir: server.serverDir })
+      setInstalled(status)
+    }
+    setInstalling(false)
+  }
+
+  const isCompatible = (ver) => {
+    if (!server.mcVersion) return null
+    // バージョンが一致するか前方一致で判定
+    const mcVer = server.mcVersion.trim()
+    const modVer = ver.mcVersion.trim()
+    return modVer === mcVer || mcVer.startsWith(modVer) || modVer.startsWith(mcVer)
+  }
+
+  if (loading) return <div style={{ color: 'var(--text-muted)', padding: 16 }}>読み込み中...</div>
+
+  return (
+    <div style={{ padding: '16px 0', display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {/* 概要 */}
+      <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 10, padding: '14px 18px' }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text)', marginBottom: 6 }}>インベントリ共有（Invsync）</div>
+        <div style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.6 }}>
+          クラスター内のFabricサーバー間でインベントリを共有します。
+          同じクラスターのMariaDBに接続して、プレイヤーデータを同期します。
+        </div>
+      </div>
+
+      {/* インストール状態 */}
+      <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 10, padding: '14px 18px' }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text)', marginBottom: 10 }}>インストール状態</div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
+          <span style={{
+            width: 10, height: 10, borderRadius: '50%', flexShrink: 0,
+            background: installed?.installed ? '#22c55e' : '#6b7280',
+          }} />
+          <span style={{ fontSize: 13, color: installed?.installed ? '#22c55e' : 'var(--text-muted)' }}>
+            {installed?.installed ? `インストール済み: ${installed.fileName}` : '未インストール'}
+          </span>
+        </div>
+
+        {/* バージョン選択 */}
+        {versions.length > 0 ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 4 }}>バージョンを選択:</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 160, overflowY: 'auto' }}>
+              {versions.map(v => {
+                const compat = isCompatible(v)
+                return (
+                  <label key={v.tag} style={{
+                    display: 'flex', alignItems: 'center', gap: 10, padding: '7px 10px',
+                    borderRadius: 6, cursor: 'pointer',
+                    background: selectedVersion === v.tag ? 'rgba(var(--accent-rgb,99,102,241),0.1)' : 'var(--bg-section)',
+                    border: selectedVersion === v.tag ? '1px solid var(--text-accent)' : '1px solid transparent',
+                  }}>
+                    <input type="radio" name="invsync-ver" value={v.tag} checked={selectedVersion === v.tag}
+                      onChange={() => setSelectedVersion(v.tag)} />
+                    <span style={{ fontSize: 13, flex: 1, color: 'var(--text)' }}>{v.tag}</span>
+                    {compat !== null && (
+                      <span style={{
+                        fontSize: 11, padding: '2px 8px', borderRadius: 99, fontWeight: 600,
+                        background: compat ? 'rgba(34,197,94,0.12)' : 'rgba(239,68,68,0.1)',
+                        color: compat ? '#15803d' : '#b91c1c',
+                        border: `1px solid ${compat ? 'rgba(34,197,94,0.3)' : 'rgba(239,68,68,0.2)'}`,
+                      }}>
+                        {compat ? '互換性あり' : '互換性なし'}
+                      </span>
+                    )}
+                  </label>
+                )
+              })}
+            </div>
+            <button
+              className="btn btn-start"
+              onClick={handleInstall}
+              disabled={installing || !selectedVersion || !server.serverDir}
+              style={{ marginTop: 8, fontSize: 12, alignSelf: 'flex-start' }}
+            >
+              {installing ? 'インストール中...' : '📥 インストール'}
+            </button>
+            {installResult && (
+              <div style={{ fontSize: 12, color: installResult.success ? '#22c55e' : '#ef4444', marginTop: 4 }}>
+                {installResult.success ? '✓ インストール完了' : `⚠ ${installResult.error}`}
+              </div>
+            )}
+          </div>
+        ) : (
+          <div style={{ fontSize: 12, color: '#f59e0b' }}>
+            ⚠ バージョン一覧を取得できませんでした。インターネット接続を確認してください。
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ─── クラスター DB タブ ──────────────────────────────────────────────────────
+function ClusterDbTab({ cluster, dbRunning }) {
+  const schemaName = `${cluster.name.replace(/[^a-zA-Z0-9_]/g, '_')}_DB`
+  const [creating, setCreating] = useState(false)
+  const [createResult, setCreateResult] = useState(null)
+
+  const createSchema = async () => {
+    setCreating(true)
+    setCreateResult(null)
+    const res = await window.api.dbCreateSchema({ clusterName: cluster.name })
+    setCreateResult(res)
+    setCreating(false)
+  }
+
+  return (
+    <div style={{ padding: '16px 0', display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {/* グローバルDB状態 */}
+      <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 10, padding: '14px 18px' }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text)', marginBottom: 10 }}>データベース接続状態</div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{
+            width: 10, height: 10, borderRadius: '50%',
+            background: dbRunning ? '#22c55e' : '#ef4444',
+            boxShadow: dbRunning ? '0 0 6px #22c55e' : '0 0 6px #ef4444',
+            flexShrink: 0
+          }} />
+          <span style={{ fontSize: 13, color: dbRunning ? '#22c55e' : '#ef4444', fontWeight: 600 }}>
+            {dbRunning ? 'MariaDB 稼働中' : 'MariaDB 停止中'}
+          </span>
+        </div>
+        {!dbRunning && (
+          <div style={{ marginTop: 8, fontSize: 12, color: 'var(--text-muted)' }}>
+            DBを使用するには、設定 &gt; SQL/DB タブから MariaDB を起動してください。
+          </div>
+        )}
+      </div>
+
+      {/* クラスター用スキーマ */}
+      <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 10, padding: '14px 18px' }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text)', marginBottom: 10 }}>クラスター専用スキーマ</div>
+        <div style={{ display: 'flex', gap: 16, fontSize: 12, marginBottom: 8 }}>
+          <span style={{ minWidth: 80, color: 'var(--text-muted)', fontWeight: 600 }}>スキーマ名</span>
+          <code style={{ color: 'var(--text)', fontFamily: 'monospace' }}>{schemaName}</code>
+        </div>
+        <div style={{ display: 'flex', gap: 16, fontSize: 12, marginBottom: 12 }}>
+          <span style={{ minWidth: 80, color: 'var(--text-muted)', fontWeight: 600 }}>用途</span>
+          <span style={{ color: 'var(--text-muted)' }}>Invsync によるクラスター内インベントリ共有</span>
+        </div>
+        <button
+          className="btn btn-restart"
+          onClick={createSchema}
+          disabled={!dbRunning || creating}
+          style={{ fontSize: 12 }}
+        >
+          {creating ? '作成中...' : '🔄 スキーマを作成/確認'}
+        </button>
+        {createResult && (
+          <div style={{ marginTop: 8, fontSize: 12, color: createResult.success ? '#22c55e' : '#ef4444' }}>
+            {createResult.success ? '✓ スキーマを確認しました' : `⚠ ${createResult.error}`}
+          </div>
+        )}
+        {!dbRunning && (
+          <div style={{ marginTop: 8, fontSize: 12, color: 'var(--text-dim)' }}>
+            ※ MariaDB が起動しているときはクラスター作成時に自動生成されます
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function ServerList() {
   const [data, setData] = useState(null)
   const [settings, setSettings] = useState({ baseDir: '' })
@@ -2056,9 +2210,12 @@ function ServerList() {
   const [showAddCluster, setShowAddCluster] = useState(false)
   const [deleteClusterConfirm, setDeleteClusterConfirm] = useState(null)
   const [deleteClusterConfirm2, setDeleteClusterConfirm2] = useState(null)
+  const [deleteClusterFiles, setDeleteClusterFiles] = useState(false)
+  const [requiredModsWarn, setRequiredModsWarn] = useState(null) // { server, cluster, missing, pendingStart }
   const [serverStatuses, setServerStatuses] = useState({})
   const [velocityStatuses, setVelocityStatuses] = useState({})
   const [velocityWarn, setVelocityWarn] = useState(null)
+  const [dbRunning, setDbRunning] = useState(false)
   const [showImport, setShowImport] = useState(false)
   const [serverLogs, setServerLogs] = useState({})
   const [velocityLogs, setVelocityLogs] = useState({})
@@ -2073,6 +2230,9 @@ function ServerList() {
     })
     window.api.loadSettings().then(s => setSettings(s))
     window.api.fetchGlobalIp().then(ip => setGlobalIp(ip))
+    window.api.dbStatus().then(s => setDbRunning(s.running))
+    const unsubDb = window.api.onDbStatusChanged(info => setDbRunning(info.running))
+    return () => unsubDb()
   }, [])
 
   useEffect(() => {
@@ -2127,7 +2287,7 @@ function ServerList() {
     })
   }
 
-  const startServer = async (server) => {
+  const doStartServer = async (server) => {
     if (!server.serverDir) return
     setStatus(server.id, 'starting')
     setServerLogs(prev => { const n = { ...prev }; delete n[server.id]; return n })
@@ -2139,6 +2299,21 @@ function ServerList() {
       javaPath: server.javaPath || null
     })
     if (!ok) setStatus(server.id, null)
+  }
+
+  const startServer = async (server) => {
+    if (!server.serverDir) return
+    // クラスター配下のFabricサーバーは起動前に必須Modをチェック
+    const inCluster = data?.clusters?.some(c => c.servers?.some(s => s.id === server.id))
+    if (inCluster && (server.type || 'fabric') === 'fabric') {
+      const check = await window.api.checkRequiredMods({ serverDir: server.serverDir, isCluster: true })
+      if (!check.ok) {
+        const cluster = data.clusters.find(c => c.servers.some(s => s.id === server.id))
+        setRequiredModsWarn({ server, cluster, missing: check.missing })
+        return
+      }
+    }
+    await doStartServer(server)
   }
 
   const stopServer = async (server) => {
@@ -2204,13 +2379,14 @@ function ServerList() {
     save(newData)
   }
 
-  const deleteServer = async (clusterId, serverId, { deleteFiles } = {}) => {
+  const deleteServer = (clusterId, serverId, deleteFiles = false) => {
     if (serverStatuses[serverId]) return
-    if (deleteFiles) {
-      const srv = clusterId === 'standalone'
-        ? data.standalone.find(s => s.id === serverId)
-        : data.clusters.find(c => c.id === clusterId)?.servers?.find(s => s.id === serverId)
-      if (srv?.serverDir) await window.api.deleteServerDir({ serverDir: srv.serverDir })
+    const allServers = clusterId === 'standalone'
+      ? data.standalone
+      : (data.clusters.find(c => c.id === clusterId)?.servers || [])
+    const srv = allServers.find(s => s.id === serverId)
+    if (deleteFiles && srv?.serverDir) {
+      window.api.deleteServerDir({ serverDir: srv.serverDir }).catch(() => {})
     }
     const newData = clusterId === 'standalone'
       ? { ...data, standalone: data.standalone.filter(s => s.id !== serverId) }
@@ -2271,11 +2447,12 @@ function ServerList() {
       })
   }
 
-  const deleteCluster = async (clusterId, { deleteFiles } = {}) => {
+  const deleteCluster = (clusterId, deleteFiles = false) => {
     const cluster = data.clusters.find(c => c.id === clusterId)
     if (cluster?.servers.some(s => serverStatuses[s.id])) return
-    if (deleteFiles && settings.baseDir && cluster) {
-      await window.api.deleteClusterDir({ clusterDir: `${settings.baseDir}\\${cluster.name}` })
+    if (deleteFiles && settings.baseDir && cluster?.name) {
+      const clusterDir = `${settings.baseDir}\\${cluster.name}`
+      window.api.deleteClusterDir({ clusterDir }).catch(() => {})
     }
     const newClusters = data.clusters.filter(c => c.id !== clusterId)
     if (activeTab === clusterId) setActiveTab(newClusters.length > 0 ? newClusters[0].id : 'standalone')
@@ -2323,6 +2500,13 @@ function ServerList() {
     save({ ...data, clusters: data.clusters.map(c => c.id === cluster.id ? updatedCluster : c) })
   }
 
+  const syncLevelName = (serverDir, serverName, levelName) => {
+    // level-name が "world"（デフォルト）の場合はサーバー名を level-name に書き込む
+    if (levelName === 'world' || !levelName) {
+      window.api.writeServerProperties({ serverDir, properties: { 'level-name': serverName } }).catch(() => {})
+    }
+  }
+
   const importCluster = (scanResult) => {
     const velocityConfig = scanResult.velocityConfig || {
       port: 25577,
@@ -2349,6 +2533,10 @@ function ServerList() {
       defaultProperties: { ...DEFAULT_CLUSTER_PROPERTIES },
       velocity: velocityConfig,
     }
+    // level-name とサーバー名を同期
+    for (const s of scanResult.servers) {
+      if (s.serverDir) syncLevelName(s.serverDir, s.name, s.levelName)
+    }
     save({ ...data, clusters: [...data.clusters, cluster] })
     setActiveTab(cluster.id)
   }
@@ -2365,6 +2553,8 @@ function ServerList() {
       jvmMemory: { value: 2, unit: 'G' },
       individualProperties: null,
     }
+    // level-name とサーバー名を同期
+    if (scanResult.serverDir) syncLevelName(scanResult.serverDir, scanResult.name, scanResult.levelName)
     save({ ...data, standalone: [...data.standalone, server] })
     setActiveTab('standalone')
   }
@@ -2475,11 +2665,14 @@ function ServerList() {
                 <button className={`tab-btn ${clusterSubTab === 'servers' ? 'active' : ''}`} onClick={() => setClusterSubTab('servers')}>サーバー</button>
                 <button className={`tab-btn ${clusterSubTab === 'settings' ? 'active' : ''}`} onClick={() => setClusterSubTab('settings')}>基本設定</button>
                 <button className={`tab-btn ${clusterSubTab === 'velocity' ? 'active' : ''}`} onClick={() => setClusterSubTab('velocity')}>Velocity</button>
-                <button className={`tab-btn ${clusterSubTab === 'db' ? 'active' : ''}`} onClick={() => setClusterSubTab('db')}>DB</button>
                 <button className={`tab-btn ${clusterSubTab === 'console' ? 'active' : ''}`} onClick={() => setClusterSubTab('console')}>コンソール</button>
                 <button className={`tab-btn ${clusterSubTab === 'mods' ? 'active' : ''}`} onClick={() => setClusterSubTab('mods')}>Mod</button>
                 <button className={`tab-btn ${clusterSubTab === 'plugins' ? 'active' : ''}`} onClick={() => setClusterSubTab('plugins')}>Plugins</button>
                 <button className={`tab-btn ${clusterSubTab === 'players' ? 'active' : ''}`} onClick={() => setClusterSubTab('players')}>プレイヤー</button>
+                <button className={`tab-btn ${clusterSubTab === 'db' ? 'active' : ''}`} onClick={() => setClusterSubTab('db')}>
+                  🗄 DB
+                  <span style={{ marginLeft: 4, width: 7, height: 7, borderRadius: '50%', background: dbRunning ? '#22c55e' : '#ef4444', display: 'inline-block', verticalAlign: 'middle' }} />
+                </button>
               </div>
             </div>
 
@@ -2493,7 +2686,7 @@ function ServerList() {
                   >
                     <ServerCard server={s}
                       onClick={() => { setSelectedServer(s); setSelectedCluster(activeCluster) }}
-                      onDelete={(opts) => deleteServer(activeCluster.id, s.id, opts)}
+                      onDelete={(deleteFiles) => deleteServer(activeCluster.id, s.id, deleteFiles)}
                       onUpdatePort={(port) => updatePort(activeCluster.id, s.id, port)}
                       serverStatus={serverStatuses[s.id] || null}
                       onStart={() => startServer(s)} onStop={() => stopServer(s)} onRestart={() => restartServer(s)}
@@ -2508,9 +2701,6 @@ function ServerList() {
               <div style={{ marginTop: 12 }}>
                 <ClusterSettings cluster={activeCluster} onUpdate={updateCluster} />
               </div>
-            )}
-            {clusterSubTab === 'db' && (
-              <ClusterDbSection cluster={activeCluster} />
             )}
             {clusterSubTab === 'velocity' && (
               <div style={{ marginTop: 12 }}>
@@ -2542,6 +2732,9 @@ function ServerList() {
                 onSendCommand={(serverId, cmd) => window.api.sendCommand({ serverId, command: cmd })}
               />
             )}
+            {clusterSubTab === 'db' && (
+              <ClusterDbTab cluster={activeCluster} dbRunning={dbRunning} />
+            )}
           </>
         )}
 
@@ -2560,7 +2753,7 @@ function ServerList() {
                 >
                   <ServerCard server={s}
                     onClick={() => { setSelectedServer(s); setSelectedCluster(null) }}
-                    onDelete={(opts) => deleteServer('standalone', s.id, opts)}
+                    onDelete={(deleteFiles) => deleteServer('standalone', s.id, deleteFiles)}
                     onUpdatePort={(port) => updatePort('standalone', s.id, port)}
                     serverStatus={serverStatuses[s.id] || null}
                     onStart={() => startServer(s)} onStop={() => stopServer(s)} onRestart={() => restartServer(s)}
@@ -2575,21 +2768,20 @@ function ServerList() {
       </div>
 
       {deleteClusterConfirm && (
-        <DeleteConfirmModal
+        <ConfirmModal
           message={`「${deleteClusterConfirm.name}」を削除しますか？\n中のサーバーも全て削除されます。`}
-          onConfirm={({ deleteFiles }) => {
-            setDeleteClusterConfirm2({ ...deleteClusterConfirm, deleteFiles })
-            setDeleteClusterConfirm(null)
-          }}
-          onClose={() => setDeleteClusterConfirm(null)}
-          canDeleteFiles={!!settings.baseDir}
+          onConfirm={() => { setDeleteClusterConfirm2(deleteClusterConfirm); setDeleteClusterConfirm(null) }}
+          onClose={() => { setDeleteClusterConfirm(null); setDeleteClusterFiles(false) }}
+          checkboxLabel="実ファイルも削除する（元に戻せません）"
+          checkboxChecked={deleteClusterFiles}
+          onCheckboxChange={setDeleteClusterFiles}
         />
       )}
       {deleteClusterConfirm2 && (
         <ConfirmModal
-          message={`本当に削除しますか？この操作は取り消せません。`}
-          onConfirm={() => { deleteCluster(deleteClusterConfirm2.id, { deleteFiles: deleteClusterConfirm2.deleteFiles }); setDeleteClusterConfirm2(null) }}
-          onClose={() => setDeleteClusterConfirm2(null)}
+          message={`本当に削除しますか？この操作は取り消せません。${deleteClusterFiles ? '\n\n⚠ 実ファイルも完全に削除されます。' : ''}`}
+          onConfirm={() => { deleteCluster(deleteClusterConfirm2.id, deleteClusterFiles); setDeleteClusterConfirm2(null); setDeleteClusterFiles(false) }}
+          onClose={() => { setDeleteClusterConfirm2(null); setDeleteClusterFiles(false) }}
         />
       )}
       {velocityWarn && (
@@ -2612,6 +2804,28 @@ function ServerList() {
           onClose={() => setShowImport(false)}
           onImportCluster={importCluster}
           onImportStandalone={importStandalone}
+        />
+      )}
+
+      {/* 必須Mod不足の警告ダイアログ */}
+      {requiredModsWarn && (
+        <RequiredModsWarnModal
+          server={requiredModsWarn.server}
+          cluster={requiredModsWarn.cluster}
+          missing={requiredModsWarn.missing}
+          onRepairAndStart={async () => {
+            const { server, cluster } = requiredModsWarn
+            setRequiredModsWarn(null)
+            await window.api.repairRequiredMods({
+              serverDir: server.serverDir,
+              mcVersion: server.mcVersion,
+              forwardingSecret: cluster?.velocity?.forwardingSecret || '',
+              missingMods: requiredModsWarn.missing,
+            })
+            await doStartServer(server)
+          }}
+          onStartAnyway={() => { const s = requiredModsWarn.server; setRequiredModsWarn(null); doStartServer(s) }}
+          onClose={() => setRequiredModsWarn(null)}
         />
       )}
     </div>

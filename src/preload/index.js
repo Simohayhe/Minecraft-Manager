@@ -101,6 +101,8 @@ const api = {
   diagUpnpClosePort: (opts) => ipcRenderer.invoke('diag-upnp-close-port', opts),
   diagUpnpListMapped: () => ipcRenderer.invoke('diag-upnp-list-mapped'),
   diagUpnpCheck: () => ipcRenderer.invoke('diag-upnp-check'),
+  diagCheckPortExternal: (opts) => ipcRenderer.invoke('diag-check-port-external', opts),
+  checkInternetSpeed: () => ipcRenderer.invoke('check-internet-speed'),
   getAllServerPorts: () => ipcRenderer.invoke('get-all-server-ports'),
 
   // ─── 必須Mod / ライブラリ ───────────────────────────────────────────────
@@ -108,6 +110,11 @@ const api = {
   repairRequiredMods: (opts) => ipcRenderer.invoke('repair-required-mods', opts),
   toggleInvsync: (opts) => ipcRenderer.invoke('toggle-invsync', opts),
   ensureModSourceFolder: (opts) => ipcRenderer.invoke('ensure-mod-source-folder', opts),
+
+  // ─── Invsync ─────────────────────────────────────────────────────────────
+  invsyncListVersions: () => ipcRenderer.invoke('invsync-list-versions'),
+  invsyncInstall: (opts) => ipcRenderer.invoke('invsync-install', opts),
+  invsyncCheck: (opts) => ipcRenderer.invoke('invsync-check', opts),
 }
 
 if (process.contextIsolated) {
