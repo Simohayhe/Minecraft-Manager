@@ -421,12 +421,17 @@ function spawnServerProcess(serverId, opts) {
   const memStr = jvmMemory ? `${jvmMemory.value}${jvmMemory.unit}` : '2G'
   const jar = serverType === 'paper' ? 'paper.jar' : 'fabric-server-launch.jar'
   // UTF-8フラグでログ文字化けを防止
+  // JAVA_TOOL_OPTIONS は shell を介さない場合でも確実に UTF-8 を適用
+  const javaEnv = {
+    ...process.env,
+    JAVA_TOOL_OPTIONS: '-Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -Dconsole.encoding=UTF-8',
+  }
   const proc = spawn(javaBin, [
     '-Dfile.encoding=UTF-8',
     '-Dstdout.encoding=UTF-8',
     '-Dconsole.encoding=UTF-8',
     `-Xms${memStr}`, `-Xmx${memStr}`, '-jar', jar, 'nogui'
-  ], { cwd: serverDir, shell: !javaPath })
+  ], { cwd: serverDir, shell: !javaPath, env: javaEnv })
   processes[serverId] = proc
   const pids = loadPids()
   pids[serverId] = proc.pid
@@ -475,6 +480,13 @@ app.whenReady().then(() => {
   ipcMain.handle('delete-server-dir', (_, { serverDir }) => {
     if (serverDir && existsSync(serverDir)) {
       rmSync(serverDir, { recursive: true, force: true })
+    }
+    return true
+  })
+
+  ipcMain.handle('delete-cluster-dir', (_, { clusterDir }) => {
+    if (clusterDir && existsSync(clusterDir)) {
+      rmSync(clusterDir, { recursive: true, force: true })
     }
     return true
   })
@@ -879,7 +891,10 @@ app.whenReady().then(() => {
       })
       const type = detectServerType(serverDir)
       const mcVersion = type === 'fabric' ? detectFabricMcVersion(serverDir) : detectPaperMcVersion(serverDir)
-      servers.push({ name: entry.name, port: parseInt(props['server-port']) || 25565, serverDir, type, mcVersion })
+      const levelName = props['level-name'] || 'world'
+      // level-name がデフォルト（"world"）以外ならそれをサーバー名として使用
+      const name = (levelName && levelName !== 'world') ? levelName : entry.name
+      servers.push({ name, port: parseInt(props['server-port']) || 25565, serverDir, type, mcVersion, levelName })
     }
     let velocityConfig = null
     const velocityDir = join(clusterDir, 'velocity')
@@ -915,10 +930,13 @@ app.whenReady().then(() => {
       props[key.trim()] = rest.join('=').trim()
     })
     const port = parseInt(props['server-port']) || 25565
-    const name = serverDir.split(/[\\/]/).pop()
+    const dirName = serverDir.split(/[\\/]/).pop()
+    const levelName = props['level-name'] || 'world'
+    // level-name がデフォルト（"world"）以外ならそれをサーバー名として使用
+    const name = (levelName && levelName !== 'world') ? levelName : dirName
     const type = detectServerType(serverDir)
     const mcVersion = type === 'fabric' ? detectFabricMcVersion(serverDir) : detectPaperMcVersion(serverDir)
-    return { success: true, name, port, serverDir, type, mcVersion }
+    return { success: true, name, port, serverDir, type, mcVersion, levelName }
   })
 
   ipcMain.handle('start-velocity', (_, { clusterId, velocityDir }) => {
@@ -1039,6 +1057,54 @@ app.whenReady().then(() => {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
+
+  // ─── DB 自動起動 ─────────────────────────────────────────────────────────
+  // アプリ起動時にDBがインストール済みなら自動起動する
+  const settingsOnStart = loadSettings()
+  if (settingsOnStart.db && settingsOnStart.db.installed && settingsOnStart.db.binDir) {
+    const autoStartDb = async () => {
+      try {
+        const binDir = settingsOnStart.db.binDir
+        const exe = join(binDir, 'mysqld.exe')
+        if (!existsSync(exe)) return
+        const dataDir = settingsOnStart.db.dataDir
+        const port = settingsOnStart.db.port || 3306
+        const proc = spawn(exe, [
+          `--datadir=${dataDir}`,
+          `--port=${port}`,
+          '--bind-address=127.0.0.1',
+          '--console',
+        ], { cwd: binDir })
+        proc.stdout?.setEncoding('utf8')
+        proc.stderr?.setEncoding('utf8')
+        const checkReady = (data) => {
+          if (data && data.includes('ready for connections')) {
+            dbProcess = proc
+            mainWindow?.webContents.send('db-status-changed', { running: true })
+          }
+        }
+        proc.stdout?.on('data', checkReady)
+        proc.stderr?.on('data', checkReady)
+        proc.on('close', () => {
+          if (dbProcess === proc) {
+            dbProcess = null
+            mainWindow?.webContents.send('db-status-changed', { running: false })
+          }
+        })
+        // 15秒タイムアウトで強制的にrunningとマーク（起動済みの場合）
+        setTimeout(() => {
+          if (!dbProcess && proc && !proc.killed) {
+            dbProcess = proc
+            mainWindow?.webContents.send('db-status-changed', { running: true })
+          }
+        }, 15000)
+      } catch { /* 自動起動失敗は無視 */ }
+    }
+    // ウィンドウが準備できてから起動
+    mainWindow.once('ready-to-show', () => {
+      setTimeout(autoStartDb, 1000)
+    })
+  }
 
   // ウィンドウ表示後に更新チェック（開発環境では無効）
   if (!is.dev) {
@@ -1865,6 +1931,52 @@ ipcMain.handle('repair-required-mods', async (_, { serverDir, mcVersion, forward
   return { success: true, repaired: results }
 })
 
+// Invsync の利用可能バージョン一覧取得（GitHub Releases）
+ipcMain.handle('invsync-list-versions', async () => {
+  try {
+    const { net } = await import('electron')
+    const fetchJson = (url) => new Promise((resolve, reject) => {
+      const req = net.request({ url, headers: { 'User-Agent': 'nexus-mc/1.0' } })
+      let d = ''; req.on('response', r => { r.on('data', c => { d += c }); r.on('end', () => { try { resolve(JSON.parse(d)) } catch (e) { reject(e) } }) }); req.on('error', reject); req.end()
+    })
+    const releases = await fetchJson('https://api.github.com/repos/Simohayhe/Invsyncmod/releases')
+    return (releases || []).map(r => ({
+      tag: r.tag_name,
+      // タグ名から MC バージョンを推定（例: v1.21.11 → 1.21.11）
+      mcVersion: r.tag_name.replace(/^v/, ''),
+      downloadUrl: (r.assets || []).find(a => a.name.endsWith('.jar'))?.browser_download_url || null,
+      fileName: (r.assets || []).find(a => a.name.endsWith('.jar'))?.name || null,
+    })).filter(r => r.downloadUrl)
+  } catch { return [] }
+})
+
+// Invsync を指定サーバーにインストール
+ipcMain.handle('invsync-install', async (_, { serverDir, downloadUrl, fileName }) => {
+  try {
+    const { net } = await import('electron')
+    const fs = require('fs')
+    const modsDir = join(serverDir, 'mods')
+    if (!existsSync(modsDir)) mkdirSync(modsDir, { recursive: true })
+    // 既存の Invsync jar を削除
+    const existing = readdirSync(modsDir).filter(f => f.toLowerCase().includes('invsync'))
+    for (const f of existing) unlinkSync(join(modsDir, f))
+    const destPath = join(modsDir, fileName)
+    await new Promise((resolve, reject) => {
+      const req = net.request(downloadUrl)
+      req.on('response', r => { const file = fs.createWriteStream(destPath); r.on('data', c => file.write(c)); r.on('end', () => { file.close(); resolve() }) }); req.on('error', reject); req.end()
+    })
+    return { success: true }
+  } catch (e) { return { success: false, error: e.message } }
+})
+
+// Invsync インストール状況チェック
+ipcMain.handle('invsync-check', (_, { serverDir }) => {
+  const modsDir = join(serverDir, 'mods')
+  if (!existsSync(modsDir)) return { installed: false, fileName: null }
+  const found = readdirSync(modsDir).find(f => f.toLowerCase().includes('invsync') && f.endsWith('.jar'))
+  return { installed: !!found, fileName: found || null }
+})
+
 // apply-server-mods: 必須Modはlibrary管理外でも削除しない
 // ─── ライブラリフォルダ自動生成 ─────────────────────────────────────────────────
 
@@ -1965,6 +2077,28 @@ ipcMain.handle('diag-check-port-external', async (_, { port }) => {
     })
     req.on('error', (e) => resolve({ success: false, error: e.message }))
     req.setTimeout(20000)
+    req.end()
+  })
+})
+
+// インターネット速度計測（Cloudflare 10MB ファイルDL）
+ipcMain.handle('check-internet-speed', async () => {
+  const { net } = await import('electron')
+  return new Promise((resolve) => {
+    const url = 'https://speed.cloudflare.com/__down?bytes=10000000'
+    const req = net.request(url)
+    let bytes = 0
+    const startTime = Date.now()
+    req.on('response', r => {
+      r.on('data', chunk => { bytes += chunk.length })
+      r.on('end', () => {
+        const elapsed = (Date.now() - startTime) / 1000
+        const mbps = (bytes * 8 / 1_000_000 / elapsed).toFixed(1)
+        resolve({ success: true, mbps: parseFloat(mbps), bytes, elapsed: elapsed.toFixed(2) })
+      })
+    })
+    req.on('error', e => resolve({ success: false, error: e.message }))
+    req.setTimeout(30000)
     req.end()
   })
 })
@@ -2413,36 +2547,44 @@ ipcMain.handle('db-get-settings', () => {
   return settings.db || null
 })
 
-// ─── 終了ブロック: DBが動いていてサーバーが起動中なら終了を阻止 ───────────────
+// ─── 終了ブロック: DBが動いていてクラスターサーバーが起動中なら終了を阻止 ──────
 app.on('before-quit', (event) => {
-  if (!dbProcess) return
   const runningServerIds = Object.keys(processes).filter(k => !k.startsWith('velocity-'))
-  if (runningServerIds.length === 0) {
-    // DBを先に停止してから終了
-    if (dbProcess) {
-      try { dbProcess.kill() } catch { /* ignore */ }
-      dbProcess = null
+
+  // DB が動いていてクラスター配下のサーバーが起動中なら終了を阻止
+  if (dbProcess && runningServerIds.length > 0) {
+    const data = loadData()
+    // クラスター配下のサーバーのみを対象にする（SQL使用サーバー）
+    const runningClusterServers = []
+    for (const id of runningServerIds) {
+      for (const cluster of data.clusters || []) {
+        const srv = (cluster.servers || []).find(s => s.id === id)
+        if (srv) {
+          runningClusterServers.push({ clusterName: cluster.name, serverName: srv.name })
+          break
+        }
+      }
     }
-    return
+    if (runningClusterServers.length > 0) {
+      event.preventDefault()
+      const detail = runningClusterServers
+        .map(({ clusterName, serverName }) => `・クラスター「${clusterName}」のサーバー「${serverName}」`)
+        .join('\n')
+      dialog.showMessageBox(mainWindow, {
+        type: 'warning',
+        buttons: ['OK'],
+        title: '終了できません',
+        message: 'DBを使用しているサーバーが起動中のため終了できません。\nサーバーを停止してからアプリを終了してください。',
+        detail
+      })
+      return
+    }
   }
-  event.preventDefault()
-  const data = loadData()
-  const names = runningServerIds.map(id => {
-    for (const cluster of data.clusters || []) {
-      const srv = (cluster.servers || []).find(s => s.id === id)
-      if (srv) return `${cluster.name} > ${srv.name}`
-    }
-    for (const sv of data.standalone || []) {
-      if (sv.id === id) return sv.name
-    }
-    return id
-  })
-  dialog.showMessageBox(mainWindow, {
-    type: 'warning',
-    buttons: ['OK'],
-    title: '終了できません',
-    message: '起動中のサーバーがあるため終了できません',
-    detail: names.map(n => `・${n}`).join('\n')
-  })
+
+  // DBを停止してから終了
+  if (dbProcess) {
+    try { dbProcess.kill() } catch { /* ignore */ }
+    dbProcess = null
+  }
 })
 

@@ -235,7 +235,7 @@ function DbSection({ baseDir }) {
   }, [load])
 
   const startInstall = async () => {
-    if (!baseDir) return alert('先にベースディレクトリを設定してください')
+    if (!baseDir) return
     const pass = dbPassword.trim() || Math.random().toString(36).slice(2, 12)
     setDbInstallLog([]); setDbInstallPct(0); setDbInstalling(true); setDbPassword(pass)
     await window.api.dbInstall({ baseDir, password: pass })
@@ -251,10 +251,19 @@ function DbSection({ baseDir }) {
     } else alert(`削除失敗: ${res.error}`)
   }
 
+  const baseDirMissing = !baseDir
+
   return (
     <div className="settings-section">
       <div className="settings-label" style={{ marginBottom: 2 }}>🗄 MariaDB 管理</div>
       <div className="settings-description">クラスター間データ連携（Invsync）に使用するデータベース</div>
+
+      {/* ベースdir未設定の警告 */}
+      {baseDirMissing && (
+        <div style={{ marginTop: 10, padding: '10px 14px', borderRadius: 8, background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.25)', fontSize: 12, color: '#b91c1c' }}>
+          ⚠ DBをインストールする前に「サーバーベースフォルダ」を設定してください。
+        </div>
+      )}
 
       {!dbInstalled ? (
         <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -265,13 +274,21 @@ function DbSection({ baseDir }) {
             <span style={{ fontSize: 13, color: 'var(--text-2)', minWidth: 90 }}>パスワード</span>
             <input className="modal-input" style={{ width: 200 }} type="text"
               placeholder="空欄で自動生成" value={dbPassword}
-              onChange={e => setDbPassword(e.target.value)} />
-            <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>⚠ 設定後変更不可</span>
+              onChange={e => setDbPassword(e.target.value)}
+              disabled={baseDirMissing} />
+          </div>
+          <div style={{ padding: '8px 12px', borderRadius: 6, background: 'rgba(251,191,36,0.08)', border: '1px solid rgba(251,191,36,0.2)', fontSize: 12, color: '#92400e' }}>
+            ⚠ パスワードはDBインストール後に変更できません。空欄の場合は自動生成されます。
           </div>
           <div>
-            <button className="btn btn-start" onClick={startInstall} disabled={dbInstalling || !baseDir}>
+            <button className="btn btn-start" onClick={startInstall} disabled={dbInstalling || baseDirMissing}>
               {dbInstalling ? 'インストール中...' : '📥 MariaDB をインストール'}
             </button>
+            {baseDirMissing && (
+              <span style={{ marginLeft: 10, fontSize: 12, color: '#ef4444' }}>
+                ※ ベースフォルダを設定してから実行してください
+              </span>
+            )}
           </div>
           {dbInstalling && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -367,9 +384,9 @@ function PortRow({ label, port, state, onOpen, onClose }) {
 }
 
 function PortSection() {
-  const [allPorts, setAllPorts]       = useState(null)   // { clusters, standalone }
-  const [mappedPorts, setMappedPorts] = useState([])     // UPnP で開いてるポート番号の配列
-  const [portStates, setPortStates]   = useState({})     // { port: PORT_STATE }
+  const [allPorts, setAllPorts]       = useState(null)
+  const [mappedPorts, setMappedPorts] = useState([])
+  const [portStates, setPortStates]   = useState({})
   const [loadingMapped, setLoadingMapped] = useState(false)
 
   const loadPorts = useCallback(async () => {
@@ -383,7 +400,6 @@ function PortSection() {
     const mapped = await window.api.diagUpnpListMapped()
     const openNums = mapped.map(m => m.port)
     setMappedPorts(openNums)
-    // ポート状態を一括更新
     setPortStates(prev => {
       const next = { ...prev }
       const src = portsData || allPorts
@@ -402,7 +418,6 @@ function PortSection() {
     loadPorts().then(d => loadMapped(d))
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // フラットなポート一覧 { key, label, port, group }
   const getFlatPorts = (d) => {
     const ports = []
     for (const cluster of d?.clusters || []) {
@@ -478,14 +493,12 @@ function PortSection() {
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16, marginTop: 12 }}>
-          {/* クラスター */}
           {clusterPorts.length > 0 && (
             <div>
               <div className="port-group-title">🔗 クラスター</div>
               <div className="port-list">{renderRows(clusterPorts)}</div>
             </div>
           )}
-          {/* スタンドアロン */}
           {standalonePorts.length > 0 && (
             <div>
               <div className="port-group-title">🖥 スタンドアロン</div>
@@ -512,9 +525,32 @@ function FolderRow({ label, description, value, onSelect }) {
   )
 }
 
+// ─── サブタブボタン ────────────────────────────────────────────────────────
+function SubTab({ active, onClick, children }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        padding: '6px 18px',
+        borderRadius: 8,
+        border: active ? '1px solid var(--text-accent)' : '1px solid var(--border)',
+        background: active ? 'rgba(var(--accent-rgb, 99,102,241),0.12)' : 'var(--bg-card)',
+        color: active ? 'var(--text-accent)' : 'var(--text-muted)',
+        fontWeight: active ? 700 : 400,
+        fontSize: 13,
+        cursor: 'pointer',
+        transition: 'all 0.15s',
+      }}
+    >
+      {children}
+    </button>
+  )
+}
+
 // ─── メインコンポーネント ────────────────────────────────────────────────────
 function Settings() {
   const [baseDir, setBaseDir] = useState('')
+  const [subTab, setSubTab] = useState('java')
 
   useEffect(() => {
     window.api.loadSettings().then(s => setBaseDir(s.baseDir || ''))
@@ -536,9 +572,17 @@ function Settings() {
         value={baseDir}
         onSelect={pick}
       />
-      <JavaSection />
-      <DbSection baseDir={baseDir} />
-      <PortSection />
+
+      {/* サブタブ */}
+      <div style={{ display: 'flex', gap: 8, padding: '4px 0 12px 0', borderBottom: '1px solid var(--border)', marginBottom: 4 }}>
+        <SubTab active={subTab === 'java'} onClick={() => setSubTab('java')}>☕ Java管理</SubTab>
+        <SubTab active={subTab === 'db'} onClick={() => setSubTab('db')}>🗄 SQL / DB</SubTab>
+        <SubTab active={subTab === 'port'} onClick={() => setSubTab('port')}>🔓 ポート管理</SubTab>
+      </div>
+
+      {subTab === 'java' && <JavaSection />}
+      {subTab === 'db'   && <DbSection baseDir={baseDir} />}
+      {subTab === 'port' && <PortSection />}
     </div>
   )
 }
