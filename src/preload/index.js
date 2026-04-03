@@ -19,6 +19,7 @@ const api = {
   onServerStopped: (serverId, cb) => { const h = () => cb(); ipcRenderer.on(`stopped-${serverId}`, h); return () => ipcRenderer.removeListener(`stopped-${serverId}`, h) },
   removeAllListeners: (channel) => ipcRenderer.removeAllListeners(channel),
   deleteServerDir: (opts) => ipcRenderer.invoke('delete-server-dir', opts),
+  deleteClusterDir: (opts) => ipcRenderer.invoke('delete-cluster-dir', opts),
   createClusterDir: (opts) => ipcRenderer.invoke('create-cluster-dir', opts),
   installVelocity: (opts) => ipcRenderer.invoke('install-velocity', opts),
   onVelocityLog: (cb) => { const h = (_, msg) => cb(msg); ipcRenderer.on('velocity-log', h); return () => ipcRenderer.removeListener('velocity-log', h) },
@@ -105,6 +106,7 @@ const api = {
   // ─── 必須Mod / ライブラリ ───────────────────────────────────────────────
   checkRequiredMods: (opts) => ipcRenderer.invoke('check-required-mods', opts),
   repairRequiredMods: (opts) => ipcRenderer.invoke('repair-required-mods', opts),
+  toggleInvsync: (opts) => ipcRenderer.invoke('toggle-invsync', opts),
   ensureModSourceFolder: (opts) => ipcRenderer.invoke('ensure-mod-source-folder', opts),
 }
 
