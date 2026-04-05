@@ -2494,16 +2494,13 @@ function PerformanceTab({ servers, serverStatuses }) {
 }
 
 // MC バージョン文字列から必要な Java メジャーバージョンを返す
-// 旧形式: "1.21.4" / 新形式(年号): "26.1"
+// 旧形式: "1.21.4" / 年号形式(確認済み): "26.x"
 function getRequiredJavaMajor(mcVersion) {
   if (!mcVersion) return null
   const parts = mcVersion.split('.').map(Number)
   const first = parts[0]
-  // 新バージョン体系 (24.x 以降 = 年号ベース)
-  if (first >= 24) {
-    if (first >= 26) return 25  // 26.x → Java 25
-    return 21                   // 24.x / 25.x → Java 21
-  }
+  // 年号ベース (26.x 以降 → Java 25)
+  if (first >= 26) return 25
   // 旧バージョン体系 (1.x.x)
   const minor = parts[1] || 0
   if (minor >= 21) return 21
