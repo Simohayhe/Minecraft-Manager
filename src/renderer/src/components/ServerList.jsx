@@ -2620,9 +2620,13 @@ function ServerList({ onNavigateToJava }) {
       const s = await window.api.loadSettings()
       const installs = s.javaInstallations || []
       const required = getRequiredJavaMajor(server.mcVersion)
-      const hasCompatible = required === 8
-        ? installs.length > 0  // Java 8 は何でも可
-        : installs.some(j => j.majorVersion >= required)
+      // Java が1件もない → 無条件でリダイレクト
+      // Java があってもバージョンが足りない → リダイレクト
+      const hasCompatible = installs.length > 0 && (
+        required === null ||          // MCバージョン不明 → 何か入っていればOK
+        required <= 8 ||              // Java 8以下 → 何でも可
+        installs.some(j => j.majorVersion >= required)
+      )
       if (!hasCompatible) {
         onNavigateToJava?.()
         return
