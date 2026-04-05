@@ -90,10 +90,11 @@ function JavaSection() {
     setCustomPath('')
   }
   const handleSelectJavaExe = async () => {
-    const path = await window.api.selectFile()
+    const path = await window.api.selectJavaExe()
     if (path) setCustomPath(path)
   }
-  const handleRemove = (entry) => {
+  const handleRemove = async (entry) => {
+    await window.api.deleteJavaInstallation({ path: entry.path, source: entry.source })
     setInstallations(prev => {
       const next = prev.filter(i => !(i.path === entry.path && i.majorVersion === entry.majorVersion))
       saveJavas(next); return next

@@ -53,6 +53,8 @@ const api = {
   applyServerMods: (opts) => ipcRenderer.invoke('apply-server-mods', opts),
   applyServerPlugins: (opts) => ipcRenderer.invoke('apply-server-plugins', opts),
   selectFile: () => ipcRenderer.invoke('select-file'),
+  selectJavaExe: () => ipcRenderer.invoke('select-java-exe'),
+  deleteJavaInstallation: (opts) => ipcRenderer.invoke('delete-java-installation', opts),
   watchLibrary: (opts) => ipcRenderer.invoke('watch-library', opts),
   unwatchLibrary: () => ipcRenderer.invoke('unwatch-library'),
   onLibraryChanged: (cb) => { const h = () => cb(); ipcRenderer.on('library-changed', h); return () => ipcRenderer.removeListener('library-changed', h) },

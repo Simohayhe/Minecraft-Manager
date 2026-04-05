@@ -1634,6 +1634,29 @@ show-plugins = false
     return result.canceled ? null : result.filePaths[0]
   })
 
+  ipcMain.handle('select-java-exe', async () => {
+    const result = await dialog.showOpenDialog({
+      properties: ['openFile'],
+      filters: [{ name: 'Java Executable', extensions: ['exe'] }]
+    })
+    return result.canceled ? null : result.filePaths[0]
+  })
+
+  ipcMain.handle('delete-java-installation', (_, { path: javaExe, source }) => {
+    if (source === 'managed' && javaExe && existsSync(javaExe)) {
+      // java.exe は bin/java.exe なので 2階層上がJDKルート
+      const jdkRoot = join(javaExe, '..', '..')
+      const managedDir = join(app.getPath('userData'), 'java')
+      // managedDir の直下であることを確認してから削除
+      const resolved = require('path').resolve(jdkRoot)
+      const managedResolved = require('path').resolve(managedDir)
+      if (resolved.startsWith(managedResolved + require('path').sep)) {
+        rmSync(resolved, { recursive: true, force: true })
+      }
+    }
+    return true
+  })
+
   let libraryWatcher = null
   const closeLibraryWatcher = () => {
     if (libraryWatcher) {
