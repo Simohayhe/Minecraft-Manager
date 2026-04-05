@@ -682,12 +682,17 @@ function AddServerModal({ onAdd, onClose, baseDir, cluster }) {
       }
       if (cluster?.velocity && baseDir) {
         const velocityDir = `${baseDir}\\${cluster.name}\\velocity`
+        // 最初のサーバーなら自動でtryServersに追加
+        const currentTry = cluster.velocity.tryServers || []
+        const effectiveTry = cluster.servers.length === 0 && currentTry.length === 0
+          ? [newServer.name]
+          : currentTry
         await window.api.writeVelocityToml({
           velocityDir, servers: [...cluster.servers, newServer],
           port: cluster.velocity.port, motd: cluster.velocity.motd,
           maxPlayers: cluster.velocity.maxPlayers, forwardingMode: cluster.velocity.forwardingMode,
           forwardingSecret: cluster.velocity.forwardingSecret,
-          tryServers: cluster.velocity.tryServers || [],
+          tryServers: effectiveTry,
         })
       }
       // スタンドアロンサーバーは online-mode=true を保証
@@ -2566,7 +2571,15 @@ function ServerList() {
     return null
   }
 
+  const [velocityStartError, setVelocityStartError] = useState(null) // clusterId
+
   const startVelocity = async (cluster) => {
+    // メインサーバーが1つも設定されていなければ起動不可
+    const tryServers = cluster.velocity?.tryServers || []
+    if (tryServers.length === 0) {
+      setVelocityStartError(cluster.id)
+      return
+    }
     setVelocityStatus(cluster.id, 'starting')
     const velocityDir = getVelocityDir(cluster)
     if (!velocityDir) { setVelocityStatus(cluster.id, null); return }
@@ -2597,9 +2610,23 @@ function ServerList() {
   const save = (newData) => { setData(newData); window.api.saveData(newData) }
 
   const addServer = (server) => {
-    const newData = addServerTarget === 'standalone'
-      ? { ...data, standalone: [...data.standalone, server] }
-      : { ...data, clusters: data.clusters.map(c => c.id === addServerTarget ? { ...c, servers: [...c.servers, server] } : c) }
+    let newData
+    if (addServerTarget === 'standalone') {
+      newData = { ...data, standalone: [...data.standalone, server] }
+    } else {
+      newData = {
+        ...data, clusters: data.clusters.map(c => {
+          if (c.id !== addServerTarget) return c
+          const newServers = [...c.servers, server]
+          // クラスターの最初のサーバーは自動でtryServersに追加
+          const currentTry = c.velocity?.tryServers || []
+          const newTry = c.servers.length === 0 && currentTry.length === 0
+            ? [server.name]
+            : currentTry
+          return { ...c, servers: newServers, velocity: { ...c.velocity, tryServers: newTry } }
+        })
+      }
+    }
     save(newData)
   }
 
@@ -2924,7 +2951,17 @@ function ServerList() {
                     return (
                       <>
                         <div className={`status-dot ${statusDotClass(vs)}`} title="Velocity" />
-                        {!vs && <button className="btn btn-start" style={{ fontSize: 12, padding: '5px 12px' }} onClick={() => startVelocity(activeCluster)}>クラスター起動</button>}
+                        {!vs && (() => {
+                          const noMain = (activeCluster.velocity?.tryServers || []).length === 0
+                          return (
+                            <button
+                              className="btn btn-start"
+                              style={{ fontSize: 12, padding: '5px 12px', opacity: noMain ? 0.45 : 1, cursor: noMain ? 'not-allowed' : 'pointer' }}
+                              onClick={() => startVelocity(activeCluster)}
+                              title={noMain ? 'メインサーバーを1つ以上選択してください' : ''}
+                            >クラスター起動</button>
+                          )
+                        })()}
                         {vs === 'starting' && <button className="btn" style={{ fontSize: 12, padding: '5px 12px', background: 'linear-gradient(135deg,#f59e0b,#d97706)', color: '#000' }} disabled>起動中...</button>}
                         {vs === 'running' && <button className="btn btn-stop" style={{ fontSize: 12, padding: '5px 12px' }} onClick={() => stopVelocity(activeCluster)}>クラスター停止</button>}
                         {vs === 'running' && <button className="btn btn-restart" style={{ fontSize: 12, padding: '5px 12px' }} onClick={() => restartVelocity(activeCluster)}>再起動</button>}
@@ -3078,6 +3115,20 @@ function ServerList() {
           onConfirm={() => { doStopVelocity(velocityWarn); setVelocityWarn(null) }}
           onClose={() => setVelocityWarn(null)}
         />
+      )}
+      {velocityStartError && (
+        <div className="modal-overlay" onClick={() => setVelocityStartError(null)}>
+          <div className="modal" style={{ width: 360 }} onClick={e => e.stopPropagation()}>
+            <div className="modal-title">⚠ メインサーバー未設定</div>
+            <p style={{ fontSize: 14, color: 'var(--text-2)', margin: '0 0 16px' }}>
+              クラスターを起動するには、メインサーバーを1つ以上選択してください。
+            </p>
+            <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: '0 0 16px' }}>
+              「サーバー」タブのサーバーカードにある「メインサーバーにする」にチェックを入れてください。
+            </p>
+            <button className="btn btn-start" style={{ width: '100%' }} onClick={() => setVelocityStartError(null)}>閉じる</button>
+          </div>
+        </div>
       )}
       {addServerTarget && (
         <AddServerModal onAdd={addServer} onClose={() => setAddServerTarget(null)} baseDir={settings.baseDir} cluster={addServerTarget === 'standalone' ? null : activeCluster} />
