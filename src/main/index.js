@@ -852,9 +852,10 @@ app.whenReady().then(() => {
           let d2 = ''; r.on('response', res => { res.on('data', c => { d2 += c }); res.on('end', () => { try { resolve(JSON.parse(d2)) } catch(e) { reject(e) } }) }); r.on('error', reject); r.end()
         })
         // MCバージョンのメジャー.マイナーに対応するJARを選択（例: 1.21.4 → "1.21"）
+        // ファイル名に "1.21" が含まれるものを選ぶ（命名規則不問）
         const majorMinor = (mcVersion || '').match(/^(\d+\.\d+)/)?.[1]
         const allJars = (ccRelease.assets || []).filter(a => a.name.endsWith('.jar'))
-        const ccAsset = (majorMinor && allJars.find(a => a.name.includes(`-${majorMinor}-`)))
+        const ccAsset = (majorMinor && allJars.find(a => a.name.includes(majorMinor)))
           || allJars[0]
         if (ccAsset) {
           // 古いClusterConnect JARを削除
@@ -1960,10 +1961,10 @@ ipcMain.handle('repair-required-mods', async (_, { serverDir, mcVersion, forward
     try {
       send('ClusterConnect を修復中...')
       const rel = await fetchJson('https://api.github.com/repos/Simohayhe/ClusterConnectFabric/releases/latest')
-      // MCバージョンのメジャー.マイナーに対応するJARを選択
+      // MCバージョンのメジャー.マイナーに対応するJARを選択（命名規則不問）
       const majorMinor = (mcVersion || '').match(/^(\d+\.\d+)/)?.[1]
       const allJars = (rel.assets || []).filter(a => a.name.endsWith('.jar'))
-      const asset = (majorMinor && allJars.find(a => a.name.includes(`-${majorMinor}-`)))
+      const asset = (majorMinor && allJars.find(a => a.name.includes(majorMinor)))
         || allJars[0]
       if (asset) {
         // 古いClusterConnect JARを削除
