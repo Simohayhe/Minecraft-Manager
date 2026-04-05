@@ -1435,6 +1435,21 @@ const generateSecret = () =>
 function VelocitySettings({ cluster, onUpdate, baseDir }) {
   const [cfg, setCfg] = useState({ ...DEFAULT_VELOCITY, ...(cluster.velocity || {}) })
   const timerRef = useRef(null)
+  const [updating, setUpdating] = useState(false)
+  const [updateResult, setUpdateResult] = useState(null)
+
+  const handleUpdateVelocity = async () => {
+    const velocityDir = cluster.servers.length > 0
+      ? `${cluster.servers[0].serverDir.replace(/[\\/][^\\/]+$/, '')}\\velocity`
+      : baseDir ? `${baseDir}\\${cluster.name}\\velocity` : null
+    if (!velocityDir) return
+    setUpdating(true)
+    setUpdateResult(null)
+    const res = await window.api.installVelocity({ velocityDir })
+    setUpdateResult(res.success ? 'success' : 'error')
+    setUpdating(false)
+    setTimeout(() => setUpdateResult(null), 4000)
+  }
 
   const set = (key, value) => {
     const next = { ...cfg, [key]: value }
@@ -1511,6 +1526,19 @@ function VelocitySettings({ cluster, onUpdate, baseDir }) {
             <span key={s.id} style={{ marginLeft: 8, color: 'var(--text-accent-2)' }}>{s.name}:{s.port}</span>
           ))
         }
+      </div>
+
+      <div style={{ marginTop: 16, display: 'flex', alignItems: 'center', gap: 10 }}>
+        <button
+          className="btn btn-restart"
+          style={{ fontSize: 12 }}
+          onClick={handleUpdateVelocity}
+          disabled={updating}
+        >
+          {updating ? '更新中...' : '🔄 Velocity を最新版に更新'}
+        </button>
+        {updateResult === 'success' && <span style={{ fontSize: 12, color: '#4ade80' }}>✓ 更新完了（再起動で反映されます）</span>}
+        {updateResult === 'error' && <span style={{ fontSize: 12, color: '#ef4444' }}>✗ 更新に失敗しました</span>}
       </div>
     </div>
   )
