@@ -687,6 +687,7 @@ function AddServerModal({ onAdd, onClose, baseDir, cluster }) {
           port: cluster.velocity.port, motd: cluster.velocity.motd,
           maxPlayers: cluster.velocity.maxPlayers, forwardingMode: cluster.velocity.forwardingMode,
           forwardingSecret: cluster.velocity.forwardingSecret,
+          tryServers: cluster.velocity.tryServers || [],
         })
       }
       // スタンドアロンサーバーは online-mode=true を保証
@@ -1005,7 +1006,7 @@ function statusDotClass(s) {
   return 'stopped'
 }
 
-function ServerCard({ server, onClick, onDelete, onUpdatePort, onStart, onStop, onRestart, serverStatus, conflictInfo }) {
+function ServerCard({ server, onClick, onDelete, onUpdatePort, onStart, onStop, onRestart, serverStatus, conflictInfo, isTry, onToggleTry }) {
   const [showConfirm, setShowConfirm] = useState(false)
   const [deleteFiles, setDeleteFiles] = useState(false)
   const [editingPort, setEditingPort] = useState(false)
@@ -1058,6 +1059,24 @@ function ServerCard({ server, onClick, onDelete, onUpdatePort, onStart, onStop, 
       <div className="server-info" style={{ color: server.individualProperties ? 'var(--text-accent-2)' : 'var(--text-dim)' }}>
         {server.individualProperties ? '個別設定あり' : 'クラスター基本設定'}
       </div>
+      {onToggleTry !== undefined && (
+        <div style={{ marginTop: 6 }} onClick={e => e.stopPropagation()}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', userSelect: 'none' }}>
+            <div
+              style={{
+                width: 14, height: 14, borderRadius: 3, border: '2px solid',
+                borderColor: isTry ? '#f59e0b' : 'var(--border-strong)',
+                background: isTry ? '#f59e0b' : 'transparent',
+                flexShrink: 0, transition: 'all 0.15s',
+              }}
+              onClick={onToggleTry}
+            />
+            <span style={{ fontSize: 11, color: isTry ? '#f59e0b' : 'var(--text-dim)', fontWeight: isTry ? 700 : 400 }}>
+              {isTry ? '⭐ メインサーバー' : 'メインサーバーにする'}
+            </span>
+          </label>
+        </div>
+      )}
       <div style={{ marginTop: 8, display: 'flex', gap: 6 }} onClick={e => e.stopPropagation()}>
         <StatusButton serverStatus={serverStatus} onStart={onStart} onStop={onStop} style={{ fontSize: 12, padding: '4px 12px' }} />
         {serverStatus === 'running' && (
@@ -1429,6 +1448,7 @@ function VelocitySettings({ cluster, onUpdate, baseDir }) {
           velocityDir, servers: cluster.servers,
           port: next.port, motd: next.motd, maxPlayers: next.maxPlayers,
           forwardingMode: next.forwardingMode, forwardingSecret: next.forwardingSecret,
+          tryServers: next.tryServers || [],
         })
       }
     }, 400)
@@ -2585,16 +2605,46 @@ function ServerList() {
 
   const deleteServer = (clusterId, serverId, deleteFiles = false) => {
     if (serverStatuses[serverId]) return
+    const cluster = clusterId !== 'standalone' ? data.clusters.find(c => c.id === clusterId) : null
     const allServers = clusterId === 'standalone'
       ? data.standalone
-      : (data.clusters.find(c => c.id === clusterId)?.servers || [])
+      : (cluster?.servers || [])
     const srv = allServers.find(s => s.id === serverId)
     if (deleteFiles && srv?.serverDir) {
       window.api.deleteServerDir({ serverDir: srv.serverDir }).catch(() => {})
     }
-    const newData = clusterId === 'standalone'
-      ? { ...data, standalone: data.standalone.filter(s => s.id !== serverId) }
-      : { ...data, clusters: data.clusters.map(c => c.id === clusterId ? { ...c, servers: c.servers.filter(s => s.id !== serverId) } : c) }
+    let newData
+    if (clusterId === 'standalone') {
+      newData = { ...data, standalone: data.standalone.filter(s => s.id !== serverId) }
+    } else {
+      newData = {
+        ...data, clusters: data.clusters.map(c => {
+          if (c.id !== clusterId) return c
+          const newServers = c.servers.filter(s => s.id !== serverId)
+          // tryServers から削除したサーバー名を除去
+          const removedName = srv?.name
+          const newTryServers = removedName
+            ? (c.velocity?.tryServers || []).filter(n => n !== removedName)
+            : (c.velocity?.tryServers || [])
+          const updatedCluster = { ...c, servers: newServers, velocity: { ...c.velocity, tryServers: newTryServers } }
+          // velocity.toml を再書き込み
+          const velocityDir = getVelocityDir(c)
+          if (velocityDir) {
+            window.api.writeVelocityToml({
+              velocityDir,
+              servers: newServers,
+              port: c.velocity?.port,
+              motd: c.velocity?.motd,
+              maxPlayers: c.velocity?.maxPlayers,
+              forwardingMode: c.velocity?.forwardingMode,
+              forwardingSecret: c.velocity?.forwardingSecret,
+              tryServers: newTryServers,
+            })
+          }
+          return updatedCluster
+        })
+      }
+    }
     save(newData)
     if (selectedServer?.id === serverId) setSelectedServer(null)
   }
@@ -2633,6 +2683,32 @@ function ServerList() {
     if (server?.serverDir) {
       window.api.readServerProperties({ serverDir: server.serverDir }).then(props => {
         if (props) window.api.writeServerProperties({ serverDir: server.serverDir, properties: { ...props, 'server-port': String(port) } })
+      })
+    }
+  }
+
+  // tryServers（メインサーバー）トグル
+  const toggleTryServer = (cluster, serverName) => {
+    const current = cluster.velocity?.tryServers || []
+    const next = current.includes(serverName)
+      ? current.filter(n => n !== serverName)
+      : [...current, serverName]
+    const updatedVelocity = { ...cluster.velocity, tryServers: next }
+    const updatedCluster = { ...cluster, velocity: updatedVelocity }
+    const newData = { ...data, clusters: data.clusters.map(c => c.id === cluster.id ? updatedCluster : c) }
+    save(newData)
+    // velocity.toml を再書き込み
+    const velocityDir = getVelocityDir(cluster)
+    if (velocityDir) {
+      window.api.writeVelocityToml({
+        velocityDir,
+        servers: cluster.servers,
+        port: updatedVelocity.port,
+        motd: updatedVelocity.motd,
+        maxPlayers: updatedVelocity.maxPlayers,
+        forwardingMode: updatedVelocity.forwardingMode,
+        forwardingSecret: updatedVelocity.forwardingSecret,
+        tryServers: next,
       })
     }
   }
@@ -2896,6 +2972,8 @@ function ServerList() {
                       serverStatus={serverStatuses[s.id] || null}
                       onStart={() => startServer(s)} onStop={() => stopServer(s)} onRestart={() => restartServer(s)}
                       conflictInfo={portConflictMap[s.port] || null}
+                      isTry={(activeCluster.velocity?.tryServers || []).includes(s.name)}
+                      onToggleTry={() => toggleTryServer(activeCluster, s.name)}
                     />
                   </div>
                 ))}

@@ -1155,10 +1155,14 @@ app.whenReady().then(() => {
     return true
   })
 
-  ipcMain.handle('write-velocity-toml', (_, { velocityDir, servers, port, motd, maxPlayers, forwardingMode, forwardingSecret }) => {
+  ipcMain.handle('write-velocity-toml', (_, { velocityDir, servers, port, motd, maxPlayers, forwardingMode, forwardingSecret, tryServers }) => {
     const modeUpper = (forwardingMode || 'modern').toUpperCase()
     const serverLines = (servers || []).map(s => `${s.name} = "127.0.0.1:${s.port}"`).join('\n')
-    const tryLine = servers?.length > 0 ? `try = ["${servers[0].name}"]` : 'try = []'
+    // tryServers が指定されていればそれを使用、なければ先頭サーバーをデフォルト
+    const tryNames = Array.isArray(tryServers) && tryServers.length > 0
+      ? tryServers
+      : (servers?.length > 0 ? [servers[0].name] : [])
+    const tryLine = tryNames.length > 0 ? `try = [${tryNames.map(n => `"${n}"`).join(', ')}]` : 'try = []'
     const toml = `config-version = "2.7"
 bind = "0.0.0.0:${port || 25577}"
 motd = "${motd || 'A Velocity Proxy'}"
