@@ -193,6 +193,10 @@ function App() {
   const [appVersion, setAppVersion] = useState('')
   const [showVersionModal, setShowVersionModal] = useState(false)
 
+  // 設定タブ遷移
+  const [settingsInitialTab, setSettingsInitialTab] = useState('java')
+  const navigateToJava = () => { setSettingsInitialTab('java'); setPage('settings') }
+
   useEffect(() => {
     window.api.loadSettings()
       .then(s => setBaseDir(s.baseDir || ''))
@@ -320,9 +324,9 @@ function App() {
           </div>
         )}
         <div className="content">
-          {page === 'servers' && <ServerList />}
+          {page === 'servers' && <ServerList onNavigateToJava={navigateToJava} />}
           {page === 'mods' && <ModManager />}
-          {page === 'settings' && <Settings />}
+          {page === 'settings' && <Settings initialTab={settingsInitialTab} />}
           {page === 'diagnostics' && <Diagnostics />}
         </div>
       </div>

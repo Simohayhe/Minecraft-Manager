@@ -801,9 +801,9 @@ function AllPerformanceSection() {
 }
 
 // ─── メインコンポーネント ────────────────────────────────────────────────────
-function Settings() {
+function Settings({ initialTab = 'java' }) {
   const [baseDir, setBaseDir] = useState('')
-  const [subTab, setSubTab] = useState('java')
+  const [subTab, setSubTab] = useState(initialTab)
   const [needsRestart, setNeedsRestart] = useState(false)
 
   useEffect(() => {

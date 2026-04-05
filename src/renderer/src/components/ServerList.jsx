@@ -2493,7 +2493,16 @@ function PerformanceTab({ servers, serverStatuses }) {
   )
 }
 
-function ServerList() {
+// MC バージョン文字列から必要な Java メジャーバージョンを返す
+function getRequiredJavaMajor(mcVersion) {
+  if (!mcVersion) return null
+  const minor = parseInt((mcVersion.split('.')[1]) || '0', 10)
+  if (minor >= 21) return 21
+  if (minor >= 17) return 17
+  return 8
+}
+
+function ServerList({ onNavigateToJava }) {
   const [data, setData] = useState(null)
   const [settings, setSettings] = useState({ baseDir: '' })
   const [globalIp, setGlobalIp] = useState('取得中...')
@@ -2599,6 +2608,21 @@ function ServerList() {
 
   const startServer = async (server) => {
     if (!server.serverDir) return
+
+    // Java バージョンチェック（サーバー個別指定がない場合のみ）
+    if (!server.javaPath) {
+      const s = await window.api.loadSettings()
+      const installs = s.javaInstallations || []
+      const required = getRequiredJavaMajor(server.mcVersion)
+      const hasCompatible = required === 8
+        ? installs.length > 0  // Java 8 は何でも可
+        : installs.some(j => j.majorVersion >= required)
+      if (!hasCompatible) {
+        onNavigateToJava?.()
+        return
+      }
+    }
+
     // クラスター配下のFabricサーバーは起動前に必須Modをチェック
     const inCluster = data?.clusters?.some(c => c.servers?.some(s => s.id === server.id))
     if (inCluster && (server.type || 'fabric') === 'fabric') {
