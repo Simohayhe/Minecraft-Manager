@@ -851,9 +851,16 @@ app.whenReady().then(() => {
           const r = net2.request({ url: 'https://api.github.com/repos/Simohayhe/ClusterConnectFabric/releases/latest', headers: { 'User-Agent': 'beacon/1.0' } })
           let d2 = ''; r.on('response', res => { res.on('data', c => { d2 += c }); res.on('end', () => { try { resolve(JSON.parse(d2)) } catch(e) { reject(e) } }) }); r.on('error', reject); r.end()
         })
-        const ccAsset = (ccRelease.assets || []).find(a => a.name.endsWith('.jar'))
+        // MCバージョンのメジャー.マイナーに対応するJARを選択（例: 1.21.4 → "1.21"）
+        const majorMinor = (mcVersion || '').match(/^(\d+\.\d+)/)?.[1]
+        const allJars = (ccRelease.assets || []).filter(a => a.name.endsWith('.jar'))
+        const ccAsset = (majorMinor && allJars.find(a => a.name.includes(`-${majorMinor}-`)))
+          || allJars[0]
         if (ccAsset) {
-          send(`ClusterConnect ${ccRelease.tag_name} をダウンロード中...`)
+          // 古いClusterConnect JARを削除
+          readdirSync(modsDir).filter(f => f.toLowerCase().includes('clusterconnect') && f.endsWith('.jar'))
+            .forEach(f => { try { unlinkSync(join(modsDir, f)) } catch { /* skip */ } })
+          send(`ClusterConnect ${ccRelease.tag_name} (MC ${majorMinor || mcVersion}) をダウンロード中...`)
           await downloadFile(ccAsset.browser_download_url, join(modsDir, ccAsset.name))
           send('ClusterConnect インストール完了！')
         }
@@ -1953,8 +1960,18 @@ ipcMain.handle('repair-required-mods', async (_, { serverDir, mcVersion, forward
     try {
       send('ClusterConnect を修復中...')
       const rel = await fetchJson('https://api.github.com/repos/Simohayhe/ClusterConnectFabric/releases/latest')
-      const asset = (rel.assets || []).find(a => a.name.endsWith('.jar'))
-      if (asset) { await downloadFile(asset.browser_download_url, join(modsDir, asset.name)); results.push('ClusterConnect') }
+      // MCバージョンのメジャー.マイナーに対応するJARを選択
+      const majorMinor = (mcVersion || '').match(/^(\d+\.\d+)/)?.[1]
+      const allJars = (rel.assets || []).filter(a => a.name.endsWith('.jar'))
+      const asset = (majorMinor && allJars.find(a => a.name.includes(`-${majorMinor}-`)))
+        || allJars[0]
+      if (asset) {
+        // 古いClusterConnect JARを削除
+        readdirSync(modsDir).filter(f => f.toLowerCase().includes('clusterconnect') && f.endsWith('.jar'))
+          .forEach(f => { try { unlinkSync(join(modsDir, f)) } catch { /* skip */ } })
+        await downloadFile(asset.browser_download_url, join(modsDir, asset.name))
+        results.push('ClusterConnect')
+      }
       if (forwardingSecret) writeFileSync(join(configDir, 'clusterconnect.json'), JSON.stringify({ secret_key: forwardingSecret.trim() }, null, 2), 'utf-8')
     } catch (e) { send(`ClusterConnect 修復失敗: ${e.message}`) }
   }
