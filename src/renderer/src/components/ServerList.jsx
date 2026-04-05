@@ -1425,6 +1425,7 @@ const DEFAULT_VELOCITY = {
   forwardingSecret: '',
   motd: 'A Velocity Proxy',
   maxPlayers: 500,
+  velocityVersion: '3.5.0-SNAPSHOT',
 }
 
 const generateSecret = () =>
