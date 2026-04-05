@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e1b4b"/>
+      <stop offset="100%" stop-color="#0f172a"/>
+    </linearGradient>
+    <filter id="glow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="7" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="512" height="512" rx="96" fill="url(#bg)"/>
+
+  <!-- Signal arcs (upward from source, sweep=0 = counterclockwise = upward) -->
+  <!-- Large arc -->
+  <path d="M 96 355 A 160 160 0 0 0 416 355"
+        fill="none" stroke="#22d3ee" stroke-width="20" stroke-linecap="round" opacity="0.2"/>
+  <!-- Medium arc -->
+  <path d="M 146 355 A 110 110 0 0 0 366 355"
+        fill="none" stroke="#22d3ee" stroke-width="24" stroke-linecap="round" opacity="0.45"/>
+  <!-- Small arc -->
+  <path d="M 196 355 A 60 60 0 0 0 316 355"
+        fill="none" stroke="#22d3ee" stroke-width="28" stroke-linecap="round" opacity="0.85"/>
+
+  <!-- Glow halo behind dot -->
+  <circle cx="256" cy="355" r="52" fill="#22d3ee" opacity="0.12"/>
+
+  <!-- Source dot (with glow) -->
+  <circle cx="256" cy="355" r="30" fill="#22d3ee" filter="url(#glow)"/>
+  <circle cx="256" cy="355" r="14" fill="white"/>
+
+  <!-- Pole -->
+  <rect x="249" y="355" width="14" height="88" rx="7" fill="#22d3ee" opacity="0.6"/>
+
+  <!-- Base plate -->
+  <rect x="208" y="430" width="96" height="22" rx="11" fill="#22d3ee" opacity="0.45"/>
+</svg>

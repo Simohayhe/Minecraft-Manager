@@ -1,5 +1,5 @@
-appId: com.electron.app
-productName: minecraft-manager
+appId: com.beacon.app
+productName: Beacon
 directories:
   buildResources: build
 files:
@@ -11,7 +11,9 @@ files:
 asarUnpack:
   - resources/**
 win:
-  executableName: minecraft-manager
+  executableName: beacon
+  icon: build/icon.ico
+  forceCodeSigning: false
 nsis:
   artifactName: ${name}-${version}-setup.${ext}
   shortcutName: ${productName}
@@ -43,4 +45,4 @@ npmRebuild: false
 publish:
   provider: github
   owner: Simohayhe
-  repo: Minecraft-Manager
+  repo: Beacon
