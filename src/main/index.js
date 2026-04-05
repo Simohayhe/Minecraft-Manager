@@ -571,51 +571,125 @@ app.whenReady().then(() => {
     const fs = require('fs')
     const send = (msg) => mainWindow.webContents.send('velocity-log', msg)
 
-    return new Promise((resolve) => {
-      send('Velocityの最新バージョンを取得中...')
-      const req1 = net.request('https://api.papermc.io/v2/projects/velocity')
-      let d1 = ''
-      req1.on('response', (r1) => {
-        r1.on('data', (c) => { d1 += c })
-        r1.on('end', () => {
-          let latestVersion
-          try { latestVersion = JSON.parse(d1).versions.at(-1) } catch { return resolve({ success: false }) }
-          send(`バージョン ${latestVersion} のビルドを取得中...`)
-
-          const req2 = net.request(`https://api.papermc.io/v2/projects/velocity/versions/${latestVersion}/builds`)
-          let d2 = ''
-          req2.on('response', (r2) => {
-            r2.on('data', (c) => { d2 += c })
-            r2.on('end', () => {
-              let latestBuild
-              try { latestBuild = JSON.parse(d2).builds.at(-1).build } catch { return resolve({ success: false }) }
-              const jarName = `velocity-${latestVersion}-${latestBuild}.jar`
-              const dlUrl = `https://api.papermc.io/v2/projects/velocity/versions/${latestVersion}/builds/${latestBuild}/downloads/${jarName}`
-              send(`Velocity ${latestVersion} (build ${latestBuild}) をダウンロード中...`)
-
-              const jarPath = join(velocityDir, 'velocity.jar')
-              const req3 = net.request(dlUrl)
-              req3.on('response', (r3) => {
-                const file = fs.createWriteStream(jarPath)
-                r3.on('data', (c) => file.write(c))
-                r3.on('end', () => {
-                  file.close()
-                  send('Velocityのインストール完了！')
-                  resolve({ success: true, jarPath })
-                })
-              })
-              req3.on('error', (e) => { send(`ダウンロードエラー: ${e.message}`); resolve({ success: false }) })
-              req3.end()
-            })
-          })
-          req2.on('error', (e) => { send(`ビルド取得エラー: ${e.message}`); resolve({ success: false }) })
-          req2.end()
+    const netGetJson = (url) => new Promise((resolve, reject) => {
+      const req = net.request({ url, method: 'GET', headers: { 'User-Agent': 'Mozilla/5.0 (compatible; beacon-mc/1.0)', 'Accept': 'application/json' } })
+      let data = ''
+      req.on('response', (r) => {
+        r.on('data', c => { data += c })
+        r.on('end', () => {
+          if (r.statusCode >= 400) return reject(new Error(`HTTP ${r.statusCode}`))
+          try { resolve(JSON.parse(data)) } catch (e) { reject(e) }
         })
       })
-      req1.on('error', (e) => { send(`バージョン取得エラー: ${e.message}`); resolve({ success: false }) })
-      req1.end()
+      req.on('error', reject)
+      req.end()
     })
+
+    const netDownload = (url, destPath) => new Promise((resolve, reject) => {
+      const req = net.request({ url, method: 'GET', headers: { 'User-Agent': 'Mozilla/5.0 (compatible; beacon-mc/1.0)' } })
+      req.on('response', (r) => {
+        if (r.statusCode >= 400) { r.resume(); return reject(new Error(`HTTP ${r.statusCode}`)) }
+        const file = fs.createWriteStream(destPath)
+        r.on('data', c => file.write(c))
+        r.on('end', () => { file.close(); resolve() })
+        r.on('error', reject)
+      })
+      req.on('error', reject)
+      req.end()
+    })
+
+    try {
+      send('Velocityの最新バージョンを取得中...')
+      let versionName = null, buildId = null, downloadUrl = null
+
+      // ── v3 API（3.5.0-SNAPSHOT 以降対応） ──────────────────────────────
+      try {
+        const v3 = await netGetJson('https://api.papermc.io/v3/projects/velocity')
+        const latestVer = (v3.versions || []).at(-1)
+        if (latestVer) {
+          send(`v3 API: ${latestVer} のビルド情報を取得中...`)
+          const buildsData = await netGetJson(`https://api.papermc.io/v3/projects/velocity/versions/${latestVer}/builds`)
+          const latestBuild = (buildsData.builds || []).at(-1)
+          if (latestBuild) {
+            versionName = latestVer
+            buildId = latestBuild.id
+            const dl = latestBuild.downloads?.default || latestBuild.downloads?.application
+            const sha256 = dl?.sha256
+            const jarName = dl?.name || `velocity-${latestVer}-${buildId}.jar`
+            downloadUrl = sha256
+              ? `https://fill-data.papermc.io/v1/objects/${sha256}/${jarName}`
+              : `https://api.papermc.io/v2/projects/velocity/versions/${latestVer}/builds/${buildId}/downloads/${jarName}`
+          }
+        }
+      } catch (e) {
+        send(`v3 API: ${e.message}、v2 API にフォールバック...`)
+      }
+
+      // ── v2 API（フォールバック、最大 3.4.0-SNAPSHOT） ──────────────────
+      if (!downloadUrl) {
+        const v2 = await netGetJson('https://api.papermc.io/v2/projects/velocity')
+        const latestVer = (v2.versions || []).at(-1)
+        if (!latestVer) throw new Error('バージョン情報が取得できません')
+        send(`v2 API: ${latestVer} のビルド情報を取得中...`)
+        const buildsData = await netGetJson(`https://api.papermc.io/v2/projects/velocity/versions/${latestVer}/builds`)
+        const latestBuild = (buildsData.builds || []).at(-1)
+        if (!latestBuild) throw new Error('ビルド情報が取得できません')
+        versionName = latestVer
+        buildId = latestBuild.build
+        const jarName = `velocity-${latestVer}-${buildId}.jar`
+        downloadUrl = `https://api.papermc.io/v2/projects/velocity/versions/${latestVer}/builds/${buildId}/downloads/${jarName}`
+      }
+
+      send(`Velocity ${versionName} (build ${buildId}) をダウンロード中...`)
+      const jarPath = join(velocityDir, 'velocity.jar')
+      await netDownload(downloadUrl, jarPath)
+      send('Velocityのインストール完了！')
+      return { success: true, jarPath, version: versionName, build: buildId }
+    } catch (e) {
+      send(`エラー: ${e.message}`)
+      return { success: false, error: e.message }
+    }
   })
+
+  // Velocity の最新バージョン情報を取得（インストールなし）
+  ipcMain.handle('fetch-velocity-latest', async () => {
+    const { net } = await import('electron')
+    const netGetJson = (url) => new Promise((resolve, reject) => {
+      const req = net.request({ url, method: 'GET', headers: { 'User-Agent': 'Mozilla/5.0 (compatible; beacon-mc/1.0)', 'Accept': 'application/json' } })
+      let data = ''
+      req.on('response', (r) => {
+        r.on('data', c => { data += c })
+        r.on('end', () => {
+          if (r.statusCode >= 400) return reject(new Error(`HTTP ${r.statusCode}`))
+          try { resolve(JSON.parse(data)) } catch (e) { reject(e) }
+        })
+      })
+      req.on('error', reject)
+      req.end()
+    })
+    try {
+      // v3 API
+      const v3 = await netGetJson('https://api.papermc.io/v3/projects/velocity')
+      const latestVer = (v3.versions || []).at(-1)
+      if (latestVer) {
+        const buildsData = await netGetJson(`https://api.papermc.io/v3/projects/velocity/versions/${latestVer}/builds`)
+        const latestBuild = (buildsData.builds || []).at(-1)
+        if (latestBuild) return { success: true, version: latestVer, build: latestBuild.id }
+      }
+    } catch { /* v2 fallback */ }
+    try {
+      const v2 = await netGetJson('https://api.papermc.io/v2/projects/velocity')
+      const latestVer = (v2.versions || []).at(-1)
+      if (latestVer) {
+        const buildsData = await netGetJson(`https://api.papermc.io/v2/projects/velocity/versions/${latestVer}/builds`)
+        const latestBuild = (buildsData.builds || []).at(-1)
+        if (latestBuild) return { success: true, version: latestVer, build: latestBuild.build }
+      }
+    } catch {}
+    return { success: false }
+  })
+
+  ipcMain.handle('get-app-version', () => app.getVersion())
 
   ipcMain.handle('fetch-global-ip', async () => {
     const { net } = await import('electron')

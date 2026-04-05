@@ -125,6 +125,10 @@ const api = {
 
   // ─── アプリ制御 ──────────────────────────────────────────────────────────
   restartApp: () => ipcRenderer.invoke('restart-app'),
+
+  // ─── バージョン情報 ──────────────────────────────────────────────────────
+  getAppVersion: () => ipcRenderer.invoke('get-app-version'),
+  fetchVelocityLatest: () => ipcRenderer.invoke('fetch-velocity-latest'),
 }
 
 if (process.contextIsolated) {

@@ -1437,6 +1437,20 @@ function VelocitySettings({ cluster, onUpdate, baseDir }) {
   const timerRef = useRef(null)
   const [updating, setUpdating] = useState(false)
   const [updateResult, setUpdateResult] = useState(null)
+  const [latestVelocity, setLatestVelocity] = useState(null)   // { version, build } | null
+  const [checkingVelocity, setCheckingVelocity] = useState(false)
+
+  // installed version stored in cluster.velocity.velocityVersion
+  const installedVersion = cluster.velocity?.velocityVersion || null
+  const hasVelocityUpdate = latestVelocity && installedVersion && latestVelocity.version !== installedVersion
+
+  useEffect(() => {
+    setCheckingVelocity(true)
+    window.api.fetchVelocityLatest().then(res => {
+      if (res.success) setLatestVelocity({ version: res.version, build: res.build })
+      setCheckingVelocity(false)
+    }).catch(() => setCheckingVelocity(false))
+  }, [])
 
   const handleUpdateVelocity = async () => {
     const velocityDir = cluster.servers.length > 0
@@ -1446,6 +1460,11 @@ function VelocitySettings({ cluster, onUpdate, baseDir }) {
     setUpdating(true)
     setUpdateResult(null)
     const res = await window.api.installVelocity({ velocityDir })
+    if (res.success) {
+      // save installed version into cluster data
+      const newVelocity = { ...(cluster.velocity || {}), velocityVersion: res.version }
+      onUpdate({ ...cluster, velocity: newVelocity })
+    }
     setUpdateResult(res.success ? 'success' : 'error')
     setUpdating(false)
     setTimeout(() => setUpdateResult(null), 4000)
@@ -1528,14 +1547,33 @@ function VelocitySettings({ cluster, onUpdate, baseDir }) {
         }
       </div>
 
-      <div style={{ marginTop: 16, display: 'flex', alignItems: 'center', gap: 10 }}>
+      {/* バージョン情報 */}
+      <div style={{ marginTop: 14, padding: '8px 12px', background: 'var(--bg-deep)', borderRadius: 6, fontSize: 12, color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+        <span>インストール済み：<span style={{ color: installedVersion ? 'var(--text)' : 'var(--text-dim)', fontFamily: 'monospace' }}>{installedVersion || '不明'}</span></span>
+        {checkingVelocity
+          ? <span style={{ color: 'var(--text-dim)' }}>最新版を確認中...</span>
+          : latestVelocity
+            ? <span>最新版：<span style={{ color: hasVelocityUpdate ? '#f97316' : '#4ade80', fontFamily: 'monospace', fontWeight: hasVelocityUpdate ? 700 : 400 }}>{latestVelocity.version}</span></span>
+            : <span style={{ color: 'var(--text-dim)' }}>最新版：確認失敗</span>
+        }
+        {hasVelocityUpdate && (
+          <span style={{ background: '#f97316', color: '#fff', padding: '1px 8px', borderRadius: 4, fontWeight: 700, fontSize: 11 }}>
+            更新あり
+          </span>
+        )}
+      </div>
+
+      <div style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 10 }}>
         <button
           className="btn btn-restart"
-          style={{ fontSize: 12 }}
+          style={{
+            fontSize: 12,
+            ...(hasVelocityUpdate ? { background: '#f97316', borderColor: '#f97316', color: '#fff' } : {})
+          }}
           onClick={handleUpdateVelocity}
           disabled={updating}
         >
-          {updating ? '更新中...' : '🔄 Velocity を最新版に更新'}
+          {updating ? '更新中...' : hasVelocityUpdate ? `🔄 ${latestVelocity.version} に更新` : '🔄 Velocity を最新版に更新'}
         </button>
         {updateResult === 'success' && <span style={{ fontSize: 12, color: '#4ade80' }}>✓ 更新完了（再起動で反映されます）</span>}
         {updateResult === 'error' && <span style={{ fontSize: 12, color: '#ef4444' }}>✗ 更新に失敗しました</span>}

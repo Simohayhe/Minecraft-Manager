@@ -101,6 +101,83 @@ function SetupScreen({ onComplete }) {
   )
 }
 
+// ─── バージョンモーダル ─────────────────────────────────────────────────────
+function VersionModal({ appVersion, updateState, updateVersion, updatePercent, onInstall, onClose }) {
+  const [release, setRelease] = useState(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    fetch('https://api.github.com/repos/Simohayhe/Minecraft-Manager/releases/latest', {
+      headers: { 'Accept': 'application/vnd.github.v3+json' }
+    })
+      .then(r => r.json())
+      .then(data => { setRelease(data); setLoading(false) })
+      .catch(() => setLoading(false))
+  }, [])
+
+  const isUpdateReady = updateState === 'downloaded'
+  const isDownloading = updateState === 'downloading'
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 520, width: '90vw' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+          <div style={{ fontSize: 16, fontWeight: 700, color: 'var(--text)' }}>⚡ Beacon バージョン情報</div>
+          <button className="btn" style={{ fontSize: 13, padding: '2px 10px' }} onClick={onClose}>✕</button>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
+          <div style={{ padding: '10px 14px', background: 'var(--bg-deep)', borderRadius: 8 }}>
+            <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 4 }}>現在のバージョン</div>
+            <div style={{ fontFamily: 'monospace', fontSize: 18, fontWeight: 700, color: 'var(--text)' }}>v{appVersion}</div>
+          </div>
+          <div style={{ padding: '10px 14px', background: 'var(--bg-deep)', borderRadius: 8 }}>
+            <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 4 }}>最新バージョン</div>
+            {loading
+              ? <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>確認中...</div>
+              : release?.tag_name
+                ? <div style={{ fontFamily: 'monospace', fontSize: 18, fontWeight: 700, color: (updateVersion || release.tag_name.replace(/^v/, '')) !== appVersion ? '#22c55e' : 'var(--text)' }}>
+                    {release.tag_name}
+                  </div>
+                : <div style={{ fontSize: 13, color: 'var(--text-dim)' }}>取得できませんでした</div>
+            }
+          </div>
+        </div>
+
+        {isDownloading && (
+          <div style={{ marginBottom: 14, padding: '10px 12px', background: 'var(--bg-deep)', borderRadius: 8 }}>
+            <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 6 }}>⬇ v{updateVersion} をダウンロード中... {updatePercent}%</div>
+            <div style={{ height: 4, background: 'var(--border)', borderRadius: 2, overflow: 'hidden' }}>
+              <div style={{ height: '100%', width: `${updatePercent}%`, background: '#22c55e', transition: 'width 0.3s' }} />
+            </div>
+          </div>
+        )}
+        {isUpdateReady && (
+          <div style={{ marginBottom: 14, padding: '10px 12px', background: '#14532d33', border: '1px solid #22c55e55', borderRadius: 8, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <span style={{ fontSize: 13, color: '#4ade80' }}>✅ v{updateVersion} の更新準備ができました</span>
+            <button className="btn btn-start" style={{ fontSize: 12 }} onClick={onInstall}>今すぐ再起動して更新</button>
+          </div>
+        )}
+
+        {release?.body && (
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-muted)', marginBottom: 6 }}>
+              📋 リリースノート {release.tag_name && `(${release.tag_name})`}
+            </div>
+            <div style={{
+              background: 'var(--bg-deep)', borderRadius: 8, padding: '10px 14px',
+              maxHeight: 260, overflowY: 'auto', fontSize: 12, color: 'var(--text)', lineHeight: 1.7,
+              whiteSpace: 'pre-wrap', fontFamily: 'inherit'
+            }}>
+              {release.body}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function App() {
   const [page, setPage] = useState('servers')
   const [dark, setDark] = useState(() => localStorage.getItem('theme') === 'dark')
@@ -112,10 +189,18 @@ function App() {
   const [updateVersion, setUpdateVersion] = useState('')
   const [updatePercent, setUpdatePercent] = useState(0)
 
+  // バージョン表示
+  const [appVersion, setAppVersion] = useState('')
+  const [showVersionModal, setShowVersionModal] = useState(false)
+
   useEffect(() => {
     window.api.loadSettings()
       .then(s => setBaseDir(s.baseDir || ''))
       .catch(() => setBaseDir(''))
+  }, [])
+
+  useEffect(() => {
+    window.api.getAppVersion().then(v => setAppVersion(v)).catch(() => {})
   }, [])
 
   useEffect(() => {
@@ -190,6 +275,25 @@ function App() {
         <button className="theme-toggle" onClick={() => setDark((d) => !d)}>
           {dark ? '☀ ライトモード' : '🌙 ダークモード'}
         </button>
+        {/* バージョンボタン */}
+        <button
+          onClick={() => setShowVersionModal(true)}
+          title="バージョン情報・アップデート"
+          style={{
+            background: 'none', border: '1px solid',
+            borderColor: updateState !== 'idle' ? '#22c55e' : 'var(--border)',
+            cursor: 'pointer', padding: '5px 10px',
+            fontSize: 11, borderRadius: 6,
+            color: updateState !== 'idle' ? '#22c55e' : 'var(--text-dim)',
+            fontWeight: updateState !== 'idle' ? 700 : 400,
+            margin: '4px 0 4px',
+            display: 'flex', alignItems: 'center', gap: 5,
+            transition: 'color 0.3s, border-color 0.3s',
+          }}
+        >
+          {updateState !== 'idle' ? '🟢' : '⚫'} {appVersion ? `v${appVersion}` : '...'}
+          {updateState !== 'idle' && <span style={{ fontSize: 10, background: '#22c55e', color: '#fff', padding: '0 5px', borderRadius: 3 }}>NEW</span>}
+        </button>
       </div>
       <div className="content-wrap">
         {updateState === 'downloading' && (
@@ -222,6 +326,16 @@ function App() {
           {page === 'diagnostics' && <Diagnostics />}
         </div>
       </div>
+      {showVersionModal && (
+        <VersionModal
+          appVersion={appVersion}
+          updateState={updateState}
+          updateVersion={updateVersion}
+          updatePercent={updatePercent}
+          onInstall={() => { window.api.installUpdate(); setShowVersionModal(false) }}
+          onClose={() => setShowVersionModal(false)}
+        />
+      )}
     </div>
   )
 }
