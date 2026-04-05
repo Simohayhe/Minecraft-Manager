@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo } from 'react'
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 
 // クラスター基本設定で共通化できる項目
 const CLUSTER_KEYS = [
@@ -161,7 +161,7 @@ const DEFAULT_PROPERTIES = {
   'max-world-size': '29999984',
   'motd': 'A Minecraft Server',
   'network-compression-threshold': '512',
-  'online-mode': 'false',
+  'online-mode': 'true',
   'op-permission-level': '4',
   'pause-when-empty-seconds': '60',
   'player-idle-timeout': '0',
@@ -198,10 +198,10 @@ const DEFAULT_CLUSTER_PROPERTIES = Object.fromEntries(
   CLUSTER_KEYS.map(k => [k, DEFAULT_PROPERTIES[k]])
 )
 
-// 常時ONにするMod（FabricAPI, FabricProxy-Lite）
+// 常時ONにするMod（FabricAPI）
 const isLockedMod = (filename) => {
   const lower = filename.toLowerCase()
-  return lower.includes('fabric-api') || lower.includes('fabricproxy')
+  return lower.includes('fabric-api')
 }
 
 function PropertyField({ propKey, value, onChange, disabled = false }) {
@@ -689,6 +689,13 @@ function AddServerModal({ onAdd, onClose, baseDir, cluster }) {
           forwardingSecret: cluster.velocity.forwardingSecret,
         })
       }
+      // スタンドアロンサーバーは online-mode=true を保証
+      if (!cluster && result.serverDir) {
+        const props = await window.api.readServerProperties({ serverDir: result.serverDir })
+        if (props && props['online-mode'] === 'false') {
+          await window.api.writeServerProperties({ serverDir: result.serverDir, properties: { ...props, 'online-mode': 'true' } })
+        }
+      }
       onAdd(newServer)
       onClose()
     }
@@ -1127,6 +1134,8 @@ function ServerDetail({ server, cluster, onBack, onUpdateServer, serverStatus, o
     } else {
       propsToWrite = { ...curIndividualProps, ...curClusterKeyOverrides, 'server-port': String(server.port) }
     }
+    // online-mode をサーバー種別に応じて強制（クラスター=false、スタンドアロン=true）
+    propsToWrite['online-mode'] = cluster ? 'false' : 'true'
     if (server.serverDir) {
       await window.api.writeServerProperties({ serverDir: server.serverDir, properties: propsToWrite })
     }
@@ -1213,6 +1222,7 @@ function ServerDetail({ server, cluster, onBack, onUpdateServer, serverStatus, o
         {cluster && (server.type || 'fabric') === 'fabric' && (
           <button className={`tab-btn ${subTab === 'shared' ? 'active' : ''}`} onClick={() => setSubTab('shared')}>🔗 共有設定</button>
         )}
+        <button className={`tab-btn ${subTab === 'performance' ? 'active' : ''}`} onClick={() => setSubTab('performance')}>📊 パフォーマンス</button>
       </div>
 
       <div className="tab-content">
@@ -1252,7 +1262,7 @@ function ServerDetail({ server, cluster, onBack, onUpdateServer, serverStatus, o
                 }}
                 style={{ width: '100%', cursor: 'pointer' }}
               >
-                <option value="">自動 (PATH の java)</option>
+                <option value="">自動 (設定のJavaから最適を選択)</option>
                 {javaOptions.map((j, i) => (
                   <option key={i} value={j.path}>
                     Java {j.majorVersion} — {j.path}
@@ -1332,7 +1342,10 @@ function ServerDetail({ server, cluster, onBack, onUpdateServer, serverStatus, o
           <ModPluginTab server={server} cluster={cluster} onUpdateServer={onUpdateServer} />
         )}
         {subTab === 'shared' && cluster && (
-          <InvsyncTab server={server} />
+          <InvsyncTab server={server} cluster={cluster} />
+        )}
+        {subTab === 'performance' && (
+          <PerformanceTab servers={[server]} serverStatuses={{ [server.id]: serverStatus }} />
         )}
       </div>
       {showWorldDeleteConfirm1 && (
@@ -1992,12 +2005,12 @@ function RequiredModsWarnModal({ server, cluster, missing, onRepairAndStart, onS
 }
 
 // ─── Invsync 共有設定タブ ────────────────────────────────────────────────────
-function InvsyncTab({ server }) {
+function InvsyncTab({ server, cluster }) {
   const [versions, setVersions] = useState([])
   const [loading, setLoading] = useState(true)
   const [selectedVersion, setSelectedVersion] = useState(null)
-  const [installing, setInstalling] = useState(false)
-  const [installResult, setInstallResult] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState(null) // { success, error }
   const [installed, setInstalled] = useState(null) // { installed, fileName }
 
   useEffect(() => {
@@ -2009,7 +2022,6 @@ function InvsyncTab({ server }) {
       ])
       setVersions(vers)
       setInstalled(status)
-      // デフォルト選択: サーバーのMCバージョンと一致するものがあれば選択
       if (vers.length > 0) {
         const match = vers.find(v => v.mcVersion === server.mcVersion) || vers[0]
         setSelectedVersion(match.tag)
@@ -2019,34 +2031,48 @@ function InvsyncTab({ server }) {
     init()
   }, [server.id])
 
-  const handleInstall = async () => {
-    if (!selectedVersion || !server.serverDir) return
-    const ver = versions.find(v => v.tag === selectedVersion)
-    if (!ver) return
-    setInstalling(true)
-    setInstallResult(null)
-    const res = await window.api.invsyncInstall({
-      serverDir: server.serverDir,
-      downloadUrl: ver.downloadUrl,
-      fileName: ver.fileName,
-    })
-    setInstallResult(res)
-    if (res.success) {
-      const status = await window.api.invsyncCheck({ serverDir: server.serverDir })
-      setInstalled(status)
-    }
-    setInstalling(false)
-  }
-
   const isCompatible = (ver) => {
     if (!server.mcVersion) return null
-    // バージョンが一致するか前方一致で判定
     const mcVer = server.mcVersion.trim()
     const modVer = ver.mcVersion.trim()
     return modVer === mcVer || mcVer.startsWith(modVer) || modVer.startsWith(mcVer)
   }
 
+  const handleToggle = async () => {
+    if (busy || !server.serverDir) return
+    setBusy(true)
+    setResult(null)
+
+    if (installed?.installed) {
+      // OFF → アンインストール
+      const res = await window.api.invsyncUninstall({ serverDir: server.serverDir })
+      setResult(res.success ? null : { success: false, error: res.error })
+      if (res.success) {
+        setInstalled({ installed: false, fileName: null })
+      }
+    } else {
+      // ON → インストール
+      const ver = versions.find(v => v.tag === selectedVersion)
+      if (!ver) { setBusy(false); return }
+      const res = await window.api.invsyncInstall({
+        serverDir: server.serverDir,
+        downloadUrl: ver.downloadUrl,
+        fileName: ver.fileName,
+        serverName: server.name,
+        clusterName: cluster?.name,
+      })
+      setResult(res.success ? { success: true } : { success: false, error: res.error })
+      if (res.success) {
+        const status = await window.api.invsyncCheck({ serverDir: server.serverDir })
+        setInstalled(status)
+      }
+    }
+    setBusy(false)
+  }
+
   if (loading) return <div style={{ color: 'var(--text-muted)', padding: 16 }}>読み込み中...</div>
+
+  const isOn = !!installed?.installed
 
   return (
     <div style={{ padding: '16px 0', display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -2059,67 +2085,88 @@ function InvsyncTab({ server }) {
         </div>
       </div>
 
-      {/* インストール状態 */}
-      <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 10, padding: '14px 18px' }}>
-        <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text)', marginBottom: 10 }}>インストール状態</div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
-          <span style={{
-            width: 10, height: 10, borderRadius: '50%', flexShrink: 0,
-            background: installed?.installed ? '#22c55e' : '#6b7280',
-          }} />
-          <span style={{ fontSize: 13, color: installed?.installed ? '#22c55e' : 'var(--text-muted)' }}>
-            {installed?.installed ? `インストール済み: ${installed.fileName}` : '未インストール'}
-          </span>
+      {/* トグルカード */}
+      <div style={{ background: 'var(--bg-card)', border: `1px solid ${isOn ? 'rgba(34,197,94,0.35)' : 'var(--border)'}`, borderRadius: 10, padding: '16px 18px' }}>
+        {/* トグル行 */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: isOn ? 0 : 16 }}>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text)', marginBottom: 3 }}>インベントリ同期</div>
+            {isOn ? (
+              <div style={{ fontSize: 12, color: '#22c55e' }}>有効 — {installed.fileName}</div>
+            ) : (
+              <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>無効</div>
+            )}
+          </div>
+          {/* トグルスイッチ */}
+          <button
+            onClick={handleToggle}
+            disabled={busy || (!isOn && versions.length === 0)}
+            style={{
+              position: 'relative', width: 48, height: 26, borderRadius: 99, border: 'none', cursor: busy ? 'wait' : 'pointer',
+              background: busy ? '#6b7280' : isOn ? '#22c55e' : '#374151',
+              transition: 'background 0.2s', flexShrink: 0, padding: 0,
+            }}
+            title={isOn ? 'クリックしてアンインストール' : 'クリックしてインストール'}
+          >
+            <span style={{
+              position: 'absolute', top: 3, left: isOn ? 24 : 3,
+              width: 20, height: 20, borderRadius: '50%', background: '#fff',
+              transition: 'left 0.2s', boxShadow: '0 1px 3px rgba(0,0,0,0.3)',
+            }} />
+          </button>
         </div>
 
-        {/* バージョン選択 */}
-        {versions.length > 0 ? (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 4 }}>バージョンを選択:</div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 160, overflowY: 'auto' }}>
-              {versions.map(v => {
-                const compat = isCompatible(v)
-                return (
-                  <label key={v.tag} style={{
-                    display: 'flex', alignItems: 'center', gap: 10, padding: '7px 10px',
-                    borderRadius: 6, cursor: 'pointer',
-                    background: selectedVersion === v.tag ? 'rgba(var(--accent-rgb,99,102,241),0.1)' : 'var(--bg-section)',
-                    border: selectedVersion === v.tag ? '1px solid var(--text-accent)' : '1px solid transparent',
-                  }}>
-                    <input type="radio" name="invsync-ver" value={v.tag} checked={selectedVersion === v.tag}
-                      onChange={() => setSelectedVersion(v.tag)} />
-                    <span style={{ fontSize: 13, flex: 1, color: 'var(--text)' }}>{v.tag}</span>
-                    {compat !== null && (
-                      <span style={{
-                        fontSize: 11, padding: '2px 8px', borderRadius: 99, fontWeight: 600,
-                        background: compat ? 'rgba(34,197,94,0.12)' : 'rgba(239,68,68,0.1)',
-                        color: compat ? '#15803d' : '#b91c1c',
-                        border: `1px solid ${compat ? 'rgba(34,197,94,0.3)' : 'rgba(239,68,68,0.2)'}`,
+        {/* OFF のときだけバージョン選択を表示 */}
+        {!isOn && (
+          <div>
+            {versions.length > 0 ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 2 }}>インストールするバージョン:</div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 3, maxHeight: 160, overflowY: 'auto' }}>
+                  {versions.map(v => {
+                    const compat = isCompatible(v)
+                    return (
+                      <label key={v.tag} style={{
+                        display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px',
+                        borderRadius: 6, cursor: 'pointer',
+                        background: selectedVersion === v.tag ? 'rgba(var(--accent-rgb,99,102,241),0.1)' : 'var(--bg-section)',
+                        border: selectedVersion === v.tag ? '1px solid var(--text-accent)' : '1px solid transparent',
                       }}>
-                        {compat ? '互換性あり' : '互換性なし'}
-                      </span>
-                    )}
-                  </label>
-                )
-              })}
-            </div>
-            <button
-              className="btn btn-start"
-              onClick={handleInstall}
-              disabled={installing || !selectedVersion || !server.serverDir}
-              style={{ marginTop: 8, fontSize: 12, alignSelf: 'flex-start' }}
-            >
-              {installing ? 'インストール中...' : '📥 インストール'}
-            </button>
-            {installResult && (
-              <div style={{ fontSize: 12, color: installResult.success ? '#22c55e' : '#ef4444', marginTop: 4 }}>
-                {installResult.success ? '✓ インストール完了' : `⚠ ${installResult.error}`}
+                        <input type="radio" name="invsync-ver" value={v.tag} checked={selectedVersion === v.tag}
+                          onChange={() => setSelectedVersion(v.tag)} />
+                        <span style={{ fontSize: 12, flex: 1, color: 'var(--text)' }}>{v.tag}</span>
+                        {compat !== null && (
+                          <span style={{
+                            fontSize: 11, padding: '2px 7px', borderRadius: 99, fontWeight: 600,
+                            background: compat ? 'rgba(34,197,94,0.12)' : 'rgba(239,68,68,0.1)',
+                            color: compat ? '#15803d' : '#b91c1c',
+                            border: `1px solid ${compat ? 'rgba(34,197,94,0.3)' : 'rgba(239,68,68,0.2)'}`,
+                          }}>
+                            {compat ? '互換性あり' : '互換性なし'}
+                          </span>
+                        )}
+                      </label>
+                    )
+                  })}
+                </div>
+              </div>
+            ) : (
+              <div style={{ fontSize: 12, color: '#f59e0b' }}>
+                ⚠ バージョン一覧を取得できませんでした。インターネット接続を確認してください。
               </div>
             )}
           </div>
-        ) : (
-          <div style={{ fontSize: 12, color: '#f59e0b' }}>
-            ⚠ バージョン一覧を取得できませんでした。インターネット接続を確認してください。
+        )}
+
+        {/* 処理中・結果表示 */}
+        {busy && (
+          <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 10 }}>
+            {isOn ? 'アンインストール中...' : 'インストール中...'}
+          </div>
+        )}
+        {result && !result.success && (
+          <div style={{ fontSize: 12, color: '#ef4444', marginTop: 10 }}>
+            ⚠ {result.error}
           </div>
         )}
       </div>
@@ -2194,6 +2241,162 @@ function ClusterDbTab({ cluster, dbRunning }) {
           </div>
         )}
       </div>
+    </div>
+  )
+}
+
+// ─── ユーティリティ ────────────────────────────────────────────────────────
+function fmtBytes(bytes) {
+  if (bytes == null) return '—'
+  if (bytes >= 1024 ** 3) return (bytes / 1024 ** 3).toFixed(1) + ' GB'
+  if (bytes >= 1024 ** 2) return (bytes / 1024 ** 2).toFixed(0) + ' MB'
+  if (bytes >= 1024) return (bytes / 1024).toFixed(0) + ' KB'
+  return bytes + ' B'
+}
+
+function GaugeBar({ value, max, color }) {
+  const pct = max > 0 ? Math.min(100, (value / max) * 100) : 0
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1 }}>
+      <div style={{ flex: 1, height: 8, borderRadius: 99, background: 'var(--bg-section)', overflow: 'hidden' }}>
+        <div style={{ width: `${pct}%`, height: '100%', borderRadius: 99, background: color, transition: 'width 0.4s' }} />
+      </div>
+      <span style={{ fontSize: 11, color: 'var(--text-muted)', minWidth: 38, textAlign: 'right' }}>{pct.toFixed(0)}%</span>
+    </div>
+  )
+}
+
+// パフォーマンスタブ（クラスター / スタンドアロン共用）
+function PerformanceTab({ servers, serverStatuses }) {
+  const [stats, setStats] = useState({})       // { serverId: { cpu, memory } }
+  const [diskSizes, setDiskSizes] = useState({}) // { serverId: bytes }
+  const [diskLoading, setDiskLoading] = useState({}) // { serverId: true }
+  const intervalRef = useRef(null)
+
+  const runningIds = servers.filter(s => serverStatuses[s.id]).map(s => s.id)
+
+  // CPU / メモリ ポーリング（3秒ごと）
+  useEffect(() => {
+    const poll = async () => {
+      if (runningIds.length === 0) return
+      const result = await window.api.getProcessStats(runningIds)
+      if (result) setStats(prev => ({ ...prev, ...result }))
+    }
+    poll()
+    intervalRef.current = setInterval(poll, 3000)
+    return () => clearInterval(intervalRef.current)
+  }, [runningIds.join(',')])
+
+  // ディスクサイズ（初回 & サーバーリスト変化時 & 5分ごとに再計算）
+  const calcDiskSizes = useCallback(() => {
+    for (const srv of servers) {
+      if (!srv.serverDir) continue
+      setDiskLoading(prev => ({ ...prev, [srv.id]: true }))
+      window.api.getDirSize(srv.serverDir).then(({ bytes }) => {
+        setDiskSizes(prev => ({ ...prev, [srv.id]: bytes }))
+        setDiskLoading(prev => { const n = { ...prev }; delete n[srv.id]; return n })
+      })
+    }
+  }, [servers.map(s => s.id).join(',')])
+
+  useEffect(() => {
+    calcDiskSizes()
+    const diskTimer = setInterval(calcDiskSizes, 5 * 60 * 1000)
+    return () => clearInterval(diskTimer)
+  }, [calcDiskSizes])
+
+  const refreshDisk = async (srv) => {
+    if (!srv.serverDir) return
+    setDiskLoading(prev => ({ ...prev, [srv.id]: true }))
+    const { bytes } = await window.api.getDirSize(srv.serverDir)
+    setDiskSizes(prev => ({ ...prev, [srv.id]: bytes }))
+    setDiskLoading(prev => { const n = { ...prev }; delete n[srv.id]; return n })
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginTop: 12 }}>
+      {servers.length === 0 && (
+        <div style={{ color: 'var(--text-dim)', fontSize: 13 }}>サーバーがありません</div>
+      )}
+      {servers.map(srv => {
+        const running = !!serverStatuses[srv.id]
+        const s = stats[srv.id]
+        const disk = diskSizes[srv.id]
+        const MAX_MEMORY_GB = (srv.jvmMemory?.value || 2) * (srv.jvmMemory?.unit === 'M' ? 1 : 1024) * 1024 * 1024
+
+        return (
+          <div key={srv.id} style={{
+            background: 'var(--bg-card)', border: `1px solid ${running ? 'rgba(34,197,94,0.25)' : 'var(--border)'}`,
+            borderRadius: 10, padding: '14px 18px',
+          }}>
+            {/* ヘッダー */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+              <span style={{
+                width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
+                background: running ? '#22c55e' : '#6b7280',
+                boxShadow: running ? '0 0 5px #22c55e' : 'none',
+              }} />
+              <span style={{ fontWeight: 700, fontSize: 14, color: 'var(--text)', flex: 1 }}>{srv.name}</span>
+              <span style={{ fontSize: 11, color: 'var(--text-dim)', background: 'var(--bg-section)', padding: '2px 8px', borderRadius: 99 }}>
+                {srv.type === 'paper' ? 'Paper' : 'Fabric'}
+              </span>
+              {!running && (
+                <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>停止中</span>
+              )}
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {/* CPU */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <span style={{ fontSize: 12, color: 'var(--text-muted)', minWidth: 60 }}>CPU</span>
+                {running && s ? (
+                  <GaugeBar value={s.cpu} max={100} color="linear-gradient(90deg,#6366f1,#8b5cf6)" />
+                ) : (
+                  <span style={{ fontSize: 12, color: 'var(--text-dim)', flex: 1 }}>
+                    {running ? '取得中...' : '—'}
+                  </span>
+                )}
+                {running && s && (
+                  <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)', minWidth: 42, textAlign: 'right' }}>
+                    {s.cpu.toFixed(1)}%
+                  </span>
+                )}
+              </div>
+
+              {/* メモリ */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <span style={{ fontSize: 12, color: 'var(--text-muted)', minWidth: 60 }}>メモリ</span>
+                {running && s ? (
+                  <GaugeBar value={s.memory} max={MAX_MEMORY_GB} color="linear-gradient(90deg,#06b6d4,#0284c7)" />
+                ) : (
+                  <span style={{ fontSize: 12, color: 'var(--text-dim)', flex: 1 }}>
+                    {running ? '取得中...' : '—'}
+                  </span>
+                )}
+                {running && s && (
+                  <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)', minWidth: 80, textAlign: 'right' }}>
+                    {fmtBytes(s.memory)} / {fmtBytes(MAX_MEMORY_GB)}
+                  </span>
+                )}
+              </div>
+
+              {/* ディスク */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <span style={{ fontSize: 12, color: 'var(--text-muted)', minWidth: 60 }}>ディスク</span>
+                <span style={{ fontSize: 12, color: 'var(--text)', flex: 1 }}>
+                  {diskLoading[srv.id] ? '計算中...' : disk != null ? fmtBytes(disk) : '—'}
+                </span>
+                <button
+                  onClick={() => refreshDisk(srv)}
+                  disabled={diskLoading[srv.id]}
+                  style={{ background: 'none', border: 'none', cursor: diskLoading[srv.id] ? 'wait' : 'pointer', color: 'var(--text-dim)', fontSize: 13, padding: '0 4px' }}
+                  title="再計算"
+                >🔄</button>
+              </div>
+            </div>
+          </div>
+        )
+      })}
     </div>
   )
 }
@@ -2287,7 +2490,7 @@ function ServerList() {
     })
   }
 
-  const doStartServer = async (server) => {
+  const doStartServer = async (server, isStandalone = false) => {
     if (!server.serverDir) return
     setStatus(server.id, 'starting')
     setServerLogs(prev => { const n = { ...prev }; delete n[server.id]; return n })
@@ -2296,7 +2499,8 @@ function ServerList() {
       serverType: server.type || 'fabric',
       jvmMemory: server.jvmMemory || { value: 2, unit: 'G' },
       autoRestart: server.autoRestart || false,
-      javaPath: server.javaPath || null
+      javaPath: server.javaPath || null,
+      isStandalone,
     })
     if (!ok) setStatus(server.id, null)
   }
@@ -2313,7 +2517,7 @@ function ServerList() {
         return
       }
     }
-    await doStartServer(server)
+    await doStartServer(server, !inCluster)
   }
 
   const stopServer = async (server) => {
@@ -2673,6 +2877,7 @@ function ServerList() {
                   🗄 DB
                   <span style={{ marginLeft: 4, width: 7, height: 7, borderRadius: '50%', background: dbRunning ? '#22c55e' : '#ef4444', display: 'inline-block', verticalAlign: 'middle' }} />
                 </button>
+                <button className={`tab-btn ${clusterSubTab === 'performance' ? 'active' : ''}`} onClick={() => setClusterSubTab('performance')}>📊 パフォーマンス</button>
               </div>
             </div>
 
@@ -2734,6 +2939,9 @@ function ServerList() {
             )}
             {clusterSubTab === 'db' && (
               <ClusterDbTab cluster={activeCluster} dbRunning={dbRunning} />
+            )}
+            {clusterSubTab === 'performance' && (
+              <PerformanceTab servers={activeCluster.servers} serverStatuses={serverStatuses} />
             )}
           </>
         )}

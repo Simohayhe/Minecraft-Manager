@@ -7,6 +7,8 @@ const api = {
   loadSettings: () => ipcRenderer.invoke('load-settings'),
   saveSettings: (settings) => ipcRenderer.invoke('save-settings', settings),
   selectFolder: () => ipcRenderer.invoke('select-folder'),
+  getSuggestedBaseDir: () => ipcRenderer.invoke('get-suggested-base-dir'),
+  createBaseDir: (opts) => ipcRenderer.invoke('create-base-dir', opts),
   openFolder: (path) => ipcRenderer.invoke('open-folder', path),
   fetchFabricVersions: () => ipcRenderer.invoke('fetch-fabric-versions'),
   installFabric: (opts) => ipcRenderer.invoke('install-fabric', opts),
@@ -90,6 +92,7 @@ const api = {
   dbCreateSchema: (opts) => ipcRenderer.invoke('db-create-schema', opts),
   dbDelete: (opts) => ipcRenderer.invoke('db-delete', opts),
   dbGetSettings: () => ipcRenderer.invoke('db-get-settings'),
+  dbGetVersion: () => ipcRenderer.invoke('db-get-version'),
   onDbInstallLog: (cb) => { const h = (_, msg) => cb(msg); ipcRenderer.on('db-install-log', h); return () => ipcRenderer.removeListener('db-install-log', h) },
   onDbInstallProgress: (cb) => { const h = (_, info) => cb(info); ipcRenderer.on('db-install-progress', h); return () => ipcRenderer.removeListener('db-install-progress', h) },
   onDbInstallDone: (cb) => { const h = (_, info) => cb(info); ipcRenderer.on('db-install-done', h); return () => ipcRenderer.removeListener('db-install-done', h) },
@@ -108,13 +111,20 @@ const api = {
   // ─── 必須Mod / ライブラリ ───────────────────────────────────────────────
   checkRequiredMods: (opts) => ipcRenderer.invoke('check-required-mods', opts),
   repairRequiredMods: (opts) => ipcRenderer.invoke('repair-required-mods', opts),
-  toggleInvsync: (opts) => ipcRenderer.invoke('toggle-invsync', opts),
   ensureModSourceFolder: (opts) => ipcRenderer.invoke('ensure-mod-source-folder', opts),
 
   // ─── Invsync ─────────────────────────────────────────────────────────────
   invsyncListVersions: () => ipcRenderer.invoke('invsync-list-versions'),
   invsyncInstall: (opts) => ipcRenderer.invoke('invsync-install', opts),
+  invsyncUninstall: (opts) => ipcRenderer.invoke('invsync-uninstall', opts),
   invsyncCheck: (opts) => ipcRenderer.invoke('invsync-check', opts),
+
+  // ─── パフォーマンス統計 ──────────────────────────────────────────────────
+  getProcessStats: (serverIds) => ipcRenderer.invoke('get-process-stats', { serverIds }),
+  getDirSize: (dir) => ipcRenderer.invoke('get-dir-size', { dir }),
+
+  // ─── アプリ制御 ──────────────────────────────────────────────────────────
+  restartApp: () => ipcRenderer.invoke('restart-app'),
 }
 
 if (process.contextIsolated) {

@@ -2,14 +2,130 @@ import { app, shell, BrowserWindow, ipcMain, dialog } from 'electron'
 import { autoUpdater } from 'electron-updater'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
-import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, readdirSync, unlinkSync, copyFileSync, watch } from 'fs'
+import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, readdirSync, unlinkSync, copyFileSync, watch, statSync } from 'fs'
 import { spawn } from 'child_process'
 import { createConnection } from 'net'
 import icon from '../../resources/icon.png?asset'
+import {
+  DB_DIR_NAME as _DB_DIR_NAME,
+  detectServerType,
+  detectFabricMcVersion,
+  detectPaperMcVersion,
+  getDbDirs,
+  resolveServerName
+} from './utils.js'
 
 // ─── MariaDB globals ─────────────────────────────────────────────────────────
 let dbProcess = null
-const DB_DIR_NAME = 'nexus-db'
+let dbStartPromise = null  // 同時起動を防ぐ共有 Promise
+let dbLastError = null     // 最後の起動エラー（Settings が後からポーリングしても取得できるよう保持）
+const DB_DIR_NAME = _DB_DIR_NAME
+
+// TCP でポートが実際に開いているか確認するヘルパー
+function checkDbPortOpen(port = 3306) {
+  return new Promise(resolve => {
+    const sock = createConnection({ host: '127.0.0.1', port }, () => {
+      sock.destroy()
+      resolve(true)
+    })
+    sock.on('error', () => resolve(false))
+    sock.setTimeout(800, () => { sock.destroy(); resolve(false) })
+  })
+}
+
+// MariaDB を起動して TCP ポートが開くまで待つ共有ヘルパー
+// 複数箇所から同時に呼ばれても 1 つの起動処理に統合される
+function doStartDb(db, baseDir) {
+  if (dbStartPromise) return dbStartPromise
+
+  dbStartPromise = (async () => {
+    try {
+      const port = db.port || 3306
+
+      // 既に起動している場合はそのまま返す
+      if (await checkDbPortOpen(port)) {
+        dbLastError = null
+        mainWindow?.webContents.send('db-status-changed', { running: true, error: null })
+        return { success: true, alreadyRunning: true }
+      }
+
+      // 実行ファイルの特定
+      const { dataDir: defaultDataDir, mysqldExe } = getDbDirs(baseDir || '')
+      const binDir = db.binDir || join(baseDir || '', DB_DIR_NAME, 'mariadb', 'bin')
+      const exe = existsSync(mysqldExe) ? mysqldExe : join(binDir, 'mysqld.exe')
+      if (!existsSync(exe)) {
+        const err = `mysqld.exe が見つかりません (探索パス: ${join(binDir, 'mysqld.exe')})`
+        dbLastError = err
+        mainWindow?.webContents.send('db-status-changed', { running: false, error: err })
+        return { success: false, error: err }
+      }
+
+      const proc = spawn(exe, [
+        `--datadir=${db.dataDir || defaultDataDir}`,
+        `--port=${port}`,
+        '--bind-address=127.0.0.1',
+        '--console'
+      ], { cwd: binDir })
+
+      // stdout/stderr を消費しつつ末尾 500 文字を保持（エラー診断用）
+      let stderrTail = ''
+      proc.stdout?.setEncoding('utf8'); proc.stderr?.setEncoding('utf8')
+      proc.stdout?.resume()
+      proc.stderr?.on('data', d => { stderrTail = (stderrTail + d).slice(-500) })
+
+      proc.on('close', () => {
+        if (dbProcess === proc) {
+          dbProcess = null
+          mainWindow?.webContents.send('db-status-changed', { running: false })
+        }
+      })
+      proc.on('error', (e) => {
+        if (dbProcess === proc) dbProcess = null
+        mainWindow?.webContents.send('db-status-changed', { running: false, error: e.message })
+      })
+
+      // TCP ポーリングで実際に接続できるまで待つ（最大 30 秒）
+      const deadline = Date.now() + 30000
+      while (Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 500))
+        if (await checkDbPortOpen(port)) {
+          dbProcess = proc
+          dbLastError = null
+          // 起動成功後、パスワードが未設定の場合は自動で設定する
+          if (db.password) {
+            try {
+              const mysql = require('mysql2/promise')
+              // まず空パスワードで接続を試みる（初期化直後など未設定の場合）
+              const testConn = await mysql.createConnection({ host: '127.0.0.1', port, user: 'root', password: '' })
+              await testConn.execute(`ALTER USER 'root'@'localhost' IDENTIFIED BY ?`, [db.password])
+              await testConn.execute('FLUSH PRIVILEGES')
+              await testConn.end()
+            } catch { /* 既にパスワードが設定済みの場合は無視 */ }
+          }
+          mainWindow?.webContents.send('db-status-changed', { running: true, error: null })
+          return { success: true }
+        }
+        if (proc.exitCode !== null) {
+          const hint = stderrTail.split('\n').filter(l => l.includes('[ERROR]') || l.includes('error')).slice(-2).join(' ').trim()
+          const errMsg = hint ? `mysqld 終了 (code: ${proc.exitCode}) — ${hint}` : `mysqld が終了しました (code: ${proc.exitCode})`
+          dbLastError = errMsg
+          mainWindow?.webContents.send('db-status-changed', { running: false, error: errMsg })
+          return { success: false, error: errMsg }
+        }
+      }
+
+      try { proc.kill() } catch { /* ignore */ }
+      const timeoutMsg = '起動タイムアウト（30秒）'
+      dbLastError = timeoutMsg
+      mainWindow?.webContents.send('db-status-changed', { running: false, error: timeoutMsg })
+      return { success: false, error: timeoutMsg }
+    } finally {
+      dbStartPromise = null
+    }
+  })()
+
+  return dbStartPromise
+}
 
 const DATA_PATH = join(app.getPath('userData'), 'servers.json')
 const SETTINGS_PATH = join(app.getPath('userData'), 'settings.json')
@@ -56,96 +172,7 @@ const serverSpawnOpts = {}
 const manualStops = new Set()
 let mainWindow = null
 
-function detectServerType(serverDir) {
-  // Paper indicators (checked first - file existence)
-  if (existsSync(join(serverDir, 'paper.jar'))) return 'paper'
-  if (existsSync(join(serverDir, 'bukkit.yml'))) return 'paper'
-  if (existsSync(join(serverDir, 'spigot.yml'))) return 'paper'
-  if (existsSync(join(serverDir, 'config', 'paper-global.yml'))) return 'paper'
-
-  // Any jar with 'paper' in name (e.g. paper-1.21.1-196.jar)
-  try {
-    const files = readdirSync(serverDir)
-    if (files.some((f) => f.endsWith('.jar') && /paper/i.test(f))) return 'paper'
-  } catch { /* ignore */ }
-
-  // Check start.bat / start.sh for jar reference
-  try {
-    const bats = ['start.bat', 'start.sh']
-    for (const bat of bats) {
-      const p = join(serverDir, bat)
-      if (existsSync(p)) {
-        const content = readFileSync(p, 'utf-8')
-        if (/paper/i.test(content)) return 'paper'
-        if (/fabric/i.test(content)) return 'fabric'
-      }
-    }
-  } catch { /* ignore */ }
-
-  // plugins/ dir with jars → almost certainly Paper/Bukkit
-  try {
-    const pluginsDir = join(serverDir, 'plugins')
-    if (existsSync(pluginsDir)) {
-      const pluginJars = readdirSync(pluginsDir).filter((f) => f.endsWith('.jar'))
-      if (pluginJars.length > 0) return 'paper'
-    }
-  } catch { /* ignore */ }
-
-  // Fabric indicators (definitive — fabric-server-launch.jar is always present for Fabric)
-  if (existsSync(join(serverDir, 'fabric-server-launch.jar'))) return 'fabric'
-  if (existsSync(join(serverDir, '.fabric'))) return 'fabric'
-
-  // plugins/ dir (even empty) → Paper/Bukkit (Fabric never creates this)
-  try {
-    if (existsSync(join(serverDir, 'plugins'))) return 'paper'
-  } catch { /* ignore */ }
-
-  return 'fabric'
-}
-
-// FabricサーバーのmcVersionを検出する
-// 1. fabric-server-launch.properties の fabric.gameVersion
-// 2. version/ または versions/ ディレクトリ内の最新バージョンフォルダ名
-function detectFabricMcVersion(serverDir) {
-  try {
-    const launchProps = join(serverDir, 'fabric-server-launch.properties')
-    if (existsSync(launchProps)) {
-      const m = readFileSync(launchProps, 'utf-8').match(/fabric\.gameVersion=(.+)/)
-      if (m) return m[1].trim()
-    }
-  } catch { /* ignore */ }
-
-  for (const dirName of ['version', 'versions']) {
-    try {
-      const versionsDir = join(serverDir, dirName)
-      if (!existsSync(versionsDir)) continue
-      const entries = readdirSync(versionsDir).filter(f => /^\d+\.\d+/.test(f))
-      if (entries.length === 0) continue
-      entries.sort((a, b) => {
-        const ap = a.split('.').map(n => parseInt(n) || 0)
-        const bp = b.split('.').map(n => parseInt(n) || 0)
-        for (let i = 0; i < Math.max(ap.length, bp.length); i++) {
-          const d = (bp[i] || 0) - (ap[i] || 0)
-          if (d !== 0) return d
-        }
-        return 0
-      })
-      return entries[0]
-    } catch { /* ignore */ }
-  }
-  return ''
-}
-
-function detectPaperMcVersion(serverDir) {
-  try {
-    const paperJar = readdirSync(serverDir).find(f => /^paper[-_][\d.]+.*\.jar$/i.test(f))
-    if (paperJar) {
-      const m = paperJar.match(/^paper[-_]([\d.]+)/i)
-      if (m) return m[1]
-    }
-  } catch { /* ignore */ }
-  return ''
-}
+// detectServerType / detectFabricMcVersion / detectPaperMcVersion は utils.js から import
 
 function writeVoidWorldConfigs(serverDir) {
   const configDir = join(serverDir, 'config')
@@ -390,7 +417,7 @@ function createWindow() {
     width: 1400,
     height: 700,
     resizable: false,
-    title: 'Nexus MC',
+    title: 'Beacon',
     show: false,
     autoHideMenuBar: true,
     ...(process.platform === 'linux' ? { icon } : {}),
@@ -431,13 +458,22 @@ function spawnServerProcess(serverId, opts) {
     '-Dstdout.encoding=UTF-8',
     '-Dconsole.encoding=UTF-8',
     `-Xms${memStr}`, `-Xmx${memStr}`, '-jar', jar, 'nogui'
-  ], { cwd: serverDir, shell: !javaPath, env: javaEnv })
+  ], { cwd: serverDir, shell: false, env: javaEnv })
   processes[serverId] = proc
   const pids = loadPids()
   pids[serverId] = proc.pid
   savePids(pids)
   proc.stdout.setEncoding('utf8')
   proc.stderr.setEncoding('utf8')
+  proc.on('error', (err) => {
+    if (err.code === 'ENOENT') {
+      mainWindow.webContents.send(`log-${serverId}`, `[エラー] Javaが見つかりません。\nJavaをインストールするか、設定でJavaパスを指定してください。\n(実行しようとしたコマンド: ${javaBin})\n`)
+    } else {
+      mainWindow.webContents.send(`log-${serverId}`, `[エラー] プロセス起動失敗: ${err.message}\n`)
+    }
+    delete processes[serverId]
+    mainWindow.webContents.send(`stopped-${serverId}`)
+  })
   proc.stdout.on('data', (msg) => {
     mainWindow.webContents.send(`log-${serverId}`, msg)
     if (msg.includes('Done') && msg.includes('For help')) {
@@ -462,7 +498,8 @@ function spawnServerProcess(serverId, opts) {
 }
 
 app.whenReady().then(() => {
-  electronApp.setAppUserModelId('com.electron')
+  app.name = 'Beacon'
+  electronApp.setAppUserModelId('com.beacon.app')
   app.on('browser-window-created', (_, window) => optimizer.watchWindowShortcuts(window))
 
   ipcMain.handle('load-data', () => loadData())
@@ -473,6 +510,22 @@ app.whenReady().then(() => {
   ipcMain.handle('select-folder', async () => {
     const result = await dialog.showOpenDialog({ properties: ['openDirectory'] })
     return result.canceled ? null : result.filePaths[0]
+  })
+
+  ipcMain.handle('get-suggested-base-dir', () => {
+    return app.getPath('userData')
+  })
+
+  ipcMain.handle('create-base-dir', (_, { path: dirPath }) => {
+    try {
+      mkdirSync(dirPath, { recursive: true })
+      const settings = loadSettings()
+      settings.baseDir = dirPath
+      saveSettings(settings)
+      return { success: true }
+    } catch (e) {
+      return { success: false, error: e.message }
+    }
   })
 
   ipcMain.handle('open-folder', (_, path) => shell.openPath(path))
@@ -499,22 +552,16 @@ app.whenReady().then(() => {
 
     // クラスター用 DB スキーマを自動作成
     let schemaName = null
-    if (dbProcess) {
-      try {
-        const mysql = require('mysql2/promise')
-        const settings = loadSettings()
-        const db = settings.db
-        if (db) {
-          const conn = await mysql.createConnection({
-            host: '127.0.0.1', port: db.port || 3306,
-            user: 'root', password: db.password
-          })
-          schemaName = `${clusterName}_DB`.replace(/[^a-zA-Z0-9_]/g, '_')
-          await conn.execute(`CREATE DATABASE IF NOT EXISTS \`${schemaName}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`)
-          await conn.end()
-        }
-      } catch { /* DB未起動時は無視 */ }
-    }
+    try {
+      const settings = loadSettings()
+      const db = settings.db
+      if (db && await checkDbPortOpen(db.port || 3306)) {
+        const conn = await connectAsRoot(db)
+        schemaName = `${clusterName}_DB`.replace(/[^a-zA-Z0-9_]/g, '_')
+        await conn.query(`CREATE DATABASE IF NOT EXISTS \`${schemaName}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`)
+        await conn.end()
+      }
+    } catch { /* DB未起動時は無視 */ }
 
     return { clusterDir, velocityDir, schemaName }
   })
@@ -607,6 +654,7 @@ app.whenReady().then(() => {
   })
 
   ipcMain.handle('install-fabric', async (_, { serverName, mcVersion, baseDir, clusterName, serverPort }) => {
+    const isCluster = clusterName && clusterName !== 'standalone'
     const clusterDir = join(baseDir, clusterName || 'standalone')
     const serverDir = join(clusterDir, serverName)
     if (!existsSync(serverDir)) mkdirSync(serverDir, { recursive: true })
@@ -614,7 +662,7 @@ app.whenReady().then(() => {
     // Java path from settings
     const settings = loadSettings()
     const javas = settings.javaInstallations || []
-    const javaEntry = javas.find(j => j.majorVersion === 21) || javas.find(j => j.majorVersion === 17) || javas[0]
+    const javaEntry = javas.find(j => j.majorVersion === 25) || javas.find(j => j.majorVersion === 21) || javas.find(j => j.majorVersion === 17) || javas.find(j => j.majorVersion === 8) || javas[0]
     const javaBin = javaEntry ? javaEntry.path : 'java'
 
     const installerUrl = 'https://maven.fabricmc.net/net/fabricmc/fabric-installer/1.0.1/fabric-installer-1.0.1.jar'
@@ -635,17 +683,24 @@ app.whenReady().then(() => {
           mainWindow.webContents.send('install-log', `${serverName}: Fabricをインストール中...`)
 
           const proc = spawn(javaBin, [
+            '-Dfile.encoding=UTF-8', '-Dstdout.encoding=UTF-8', '-Dconsole.encoding=UTF-8',
             '-jar', installerPath,
             'server', '-mcversion', mcVersion,
             '-downloadMinecraft'
-          ], { cwd: serverDir, shell: !javaEntry })
+          ], { cwd: serverDir, shell: false })
 
           proc.on('error', (err) => {
-            mainWindow.webContents.send('install-log', `Javaエラー: ${err.message}\n設定でJavaパスを確認してください`)
+            if (err.code === 'ENOENT') {
+              mainWindow.webContents.send('install-log', `[エラー] Javaが見つかりません。\nJavaをインストールするか、設定でJavaパスを指定してください。\n(実行しようとしたコマンド: ${javaBin})\n`)
+            } else {
+              mainWindow.webContents.send('install-log', `Javaエラー: ${err.message}\n設定でJavaパスを確認してください`)
+            }
             resolve({ success: false })
           })
-          proc.stdout.on('data', (d) => mainWindow.webContents.send('install-log', d.toString()))
-          proc.stderr.on('data', (d) => mainWindow.webContents.send('install-log', d.toString()))
+          proc.stdout.setEncoding('utf8')
+          proc.stderr.setEncoding('utf8')
+          proc.stdout.on('data', (d) => mainWindow.webContents.send('install-log', d))
+          proc.stderr.on('data', (d) => mainWindow.webContents.send('install-log', d))
           proc.on('close', (code) => {
             writeFileSync(join(serverDir, 'eula.txt'), 'eula=true\n')
             const launchPropsPath = join(serverDir, 'fabric-server-launch.properties')
@@ -694,7 +749,7 @@ app.whenReady().then(() => {
               'max-world-size': '29999984',
               'motd': 'A Minecraft Server',
               'network-compression-threshold': '512',
-              'online-mode': 'false',
+              'online-mode': isCluster ? 'false' : 'true',
               'op-permission-level': '4',
               'pause-when-empty-seconds': '60',
               'player-idle-timeout': '0',
@@ -752,7 +807,7 @@ app.whenReady().then(() => {
     if (!existsSync(configDir)) mkdirSync(configDir, { recursive: true })
 
     const fetchJson = (url) => new Promise((resolve, reject) => {
-      const req = net.request({ url, headers: { 'User-Agent': 'minecraft-manager/1.0' } })
+      const req = net.request({ url, headers: { 'User-Agent': 'beacon/1.0' } })
       let d = ''
       req.on('response', (r) => {
         r.on('data', (c) => { d += c })
@@ -774,24 +829,6 @@ app.whenReady().then(() => {
     })
 
     try {
-      // FabricProxy-Lite
-      send('FabricProxy-Lite を取得中...')
-      const fpVersions = await fetchJson(`https://api.modrinth.com/v2/project/fabricproxy-lite/version?loaders=%5B%22fabric%22%5D&game_versions=%5B%22${mcVersion}%22%5D`)
-      if (!fpVersions || fpVersions.length === 0) {
-        send(`FabricProxy-Lite: ${mcVersion} 対応バージョンが見つかりませんでした`)
-      } else {
-        const fpFile = fpVersions[0].files.find(f => f.primary) || fpVersions[0].files[0]
-        if (fpFile) {
-          send('FabricProxy-Lite をダウンロード中...')
-          await downloadFile(fpFile.url, join(modsDir, fpFile.filename))
-          send('FabricProxy-Lite インストール完了！')
-        }
-      }
-
-      // FabricProxy-Lite config
-      const config = `[enabled]\nhackOnlineMode = false\nhackEarlySend = false\nhackMessageChain = true\ndisableTokenVerification = false\n\n[proxy]\nsecret = "${forwardingSecret}"\nallowedProxyIps = []\n`
-      writeFileSync(join(configDir, 'FabricProxy-Lite.toml'), config, 'utf-8')
-
       // Fabric API
       send('Fabric API を取得中...')
       const faVersions = await fetchJson(`https://api.modrinth.com/v2/project/fabric-api/version?loaders=%5B%22fabric%22%5D&game_versions=%5B%22${mcVersion}%22%5D`)
@@ -811,7 +848,7 @@ app.whenReady().then(() => {
       try {
         const { net: net2 } = await import('electron')
         const ccRelease = await new Promise((resolve, reject) => {
-          const r = net2.request({ url: 'https://api.github.com/repos/Simohayhe/ClusterConnectFabric/releases/latest', headers: { 'User-Agent': 'nexus-mc/1.0' } })
+          const r = net2.request({ url: 'https://api.github.com/repos/Simohayhe/ClusterConnectFabric/releases/latest', headers: { 'User-Agent': 'beacon/1.0' } })
           let d2 = ''; r.on('response', res => { res.on('data', c => { d2 += c }); res.on('end', () => { try { resolve(JSON.parse(d2)) } catch(e) { reject(e) } }) }); r.on('error', reject); r.end()
         })
         const ccAsset = (ccRelease.assets || []).find(a => a.name.endsWith('.jar'))
@@ -822,48 +859,9 @@ app.whenReady().then(() => {
         }
       } catch (e) { send(`ClusterConnect 取得失敗（スキップ）: ${e.message}`) }
 
-      // ClusterConnect 設定ファイル
+      // ClusterConnect 設定ファイル（末尾の空白・改行を除去）
       writeFileSync(join(configDir, 'clusterconnect.json'),
-        JSON.stringify({ secret_key: forwardingSecret }, null, 2), 'utf-8')
-
-      // Invsync
-      send('Invsync を取得中...')
-      try {
-        const { net: net3 } = await import('electron')
-        const isRelease = await new Promise((resolve, reject) => {
-          const r = net3.request({ url: 'https://api.github.com/repos/Simohayhe/Invsyncmod/releases/latest', headers: { 'User-Agent': 'nexus-mc/1.0' } })
-          let d3 = ''; r.on('response', res => { res.on('data', c => { d3 += c }); res.on('end', () => { try { resolve(JSON.parse(d3)) } catch(e) { reject(e) } }) }); r.on('error', reject); r.end()
-        })
-        const isAsset = (isRelease.assets || []).find(a => a.name.endsWith('.jar'))
-        if (isAsset) {
-          send(`Invsync ${isRelease.tag_name} をダウンロード中...`)
-          await downloadFile(isAsset.browser_download_url, join(modsDir, isAsset.name))
-          send('Invsync インストール完了！')
-        }
-      } catch (e) { send(`Invsync 取得失敗（スキップ）: ${e.message}`) }
-
-      // Invsync 設定ファイル（invsyncmod.properties）
-      // サーバー名を server.properties の level-name から取得
-      const propsPath = join(serverDir, 'server.properties')
-      let serverShortName = serverDir.split(/[\\/]/).pop() || 's1'
-      if (existsSync(propsPath)) {
-        const content = readFileSync(propsPath, 'utf-8')
-        const m = content.match(/^level-name=(.+)$/m)
-        if (m) serverShortName = m[1].trim()
-      }
-      const dbSettings = loadSettings().db
-      const invsyncConfig = [
-        `server.name=${serverShortName}`,
-        `db.host=localhost`,
-        `db.port=${dbSettings?.port || 3306}`,
-        `db.name=${serverDir.split(/[\\/]/).slice(-2, -1)[0] || 'minecraftdb1'}_DB`.replace(/[^a-zA-Z0-9_]/g, '_'),
-        `db.user=root`,
-        `db.password=${dbSettings?.password || ''}`,
-        ``,
-        `db.pool.max=10`,
-        `db.pool.timeout=30000`,
-      ].join('\n')
-      writeFileSync(join(configDir, 'invsyncmod.properties'), invsyncConfig, 'utf-8')
+        JSON.stringify({ secret_key: forwardingSecret.trim() }, null, 2), 'utf-8')
 
       send('プロキシセットアップ完了！')
       return { success: true }
@@ -892,8 +890,7 @@ app.whenReady().then(() => {
       const type = detectServerType(serverDir)
       const mcVersion = type === 'fabric' ? detectFabricMcVersion(serverDir) : detectPaperMcVersion(serverDir)
       const levelName = props['level-name'] || 'world'
-      // level-name がデフォルト（"world"）以外ならそれをサーバー名として使用
-      const name = (levelName && levelName !== 'world') ? levelName : entry.name
+      const name = resolveServerName(levelName, entry.name)
       servers.push({ name, port: parseInt(props['server-port']) || 25565, serverDir, type, mcVersion, levelName })
     }
     let velocityConfig = null
@@ -932,8 +929,7 @@ app.whenReady().then(() => {
     const port = parseInt(props['server-port']) || 25565
     const dirName = serverDir.split(/[\\/]/).pop()
     const levelName = props['level-name'] || 'world'
-    // level-name がデフォルト（"world"）以外ならそれをサーバー名として使用
-    const name = (levelName && levelName !== 'world') ? levelName : dirName
+    const name = resolveServerName(levelName, dirName)
     const type = detectServerType(serverDir)
     const mcVersion = type === 'fabric' ? detectFabricMcVersion(serverDir) : detectPaperMcVersion(serverDir)
     return { success: true, name, port, serverDir, type, mcVersion, levelName }
@@ -942,17 +938,35 @@ app.whenReady().then(() => {
   ipcMain.handle('start-velocity', (_, { clusterId, velocityDir }) => {
     const key = `velocity-${clusterId}`
     if (processes[key]) return false
-    const proc = spawn('java', ['-Xms512M', '-Xmx512M', '-jar', 'velocity.jar'], { cwd: velocityDir, shell: true })
+    // 管理済みJavaから自動選択（Java21 → Java17の順で優先）
+    const velSettings = loadSettings()
+    const velInstallations = velSettings.javaInstallations || []
+    const velBestJava = [25, 21, 17].reduce((found, ver) => found || velInstallations.find(j => j.majorVersion === ver), null)
+    const velJavaBin = velBestJava ? velBestJava.path : 'java'
+    const proc = spawn(velJavaBin, [
+      '-Dfile.encoding=UTF-8', '-Dstdout.encoding=UTF-8', '-Dconsole.encoding=UTF-8',
+      '-Xms512M', '-Xmx512M', '-jar', 'velocity.jar'
+    ], { cwd: velocityDir, shell: false })
     processes[key] = proc
     const pids = loadPids()
     pids[key] = proc.pid
     savePids(pids)
-    proc.stdout.on('data', (d) => {
-      const msg = d.toString()
-      mainWindow.webContents.send(`velocity-log-${clusterId}`, msg)
-      if (msg.includes('Listening on')) mainWindow.webContents.send(`velocity-started-${clusterId}`)
+    proc.stdout.setEncoding('utf8')
+    proc.stderr.setEncoding('utf8')
+    proc.on('error', (err) => {
+      if (err.code === 'ENOENT') {
+        mainWindow.webContents.send(`velocity-log-${clusterId}`, `[エラー] Javaが見つかりません。\nJavaをインストールしてPATHを通してください。\n`)
+      } else {
+        mainWindow.webContents.send(`velocity-log-${clusterId}`, `[エラー] プロセス起動失敗: ${err.message}\n`)
+      }
+      delete processes[key]
+      mainWindow.webContents.send(`velocity-stopped-${clusterId}`)
     })
-    proc.stderr.on('data', (d) => mainWindow.webContents.send(`velocity-log-${clusterId}`, d.toString()))
+    proc.stdout.on('data', (d) => {
+      mainWindow.webContents.send(`velocity-log-${clusterId}`, d)
+      if (d.includes('Listening on')) mainWindow.webContents.send(`velocity-started-${clusterId}`)
+    })
+    proc.stderr.on('data', (d) => mainWindow.webContents.send(`velocity-log-${clusterId}`, d))
     proc.on('close', () => {
       delete processes[key]
       const p = loadPids(); delete p[key]; savePids(p)
@@ -978,9 +992,47 @@ app.whenReady().then(() => {
     return false
   })
 
-  ipcMain.handle('start-server', (_, { serverId, serverDir, serverType, jvmMemory, autoRestart, javaPath }) => {
+  ipcMain.handle('start-server', async (_, { serverId, serverDir, serverType, jvmMemory, autoRestart, javaPath, isStandalone }) => {
     if (processes[serverId]) return false
-    const opts = { serverDir, serverType, jvmMemory, autoRestart: autoRestart || false, javaPath: javaPath || null }
+
+    // スタンドアロンサーバーは online-mode=true を強制（既存サーバーの修正も兼ねる）
+    if (isStandalone) {
+      const propsPath = join(serverDir, 'server.properties')
+      if (existsSync(propsPath)) {
+        let content = readFileSync(propsPath, 'utf-8')
+        if (content.includes('online-mode=false')) {
+          content = content.replace(/^online-mode=false$/m, 'online-mode=true')
+          writeFileSync(propsPath, content, 'utf-8')
+        }
+      }
+    }
+
+    // Invsync がインストールされている場合、doStartDb で MariaDB を確実に起動してから開始
+    try {
+      const modsDir = join(serverDir, 'mods')
+      if (existsSync(modsDir)) {
+        const hasInvsync = readdirSync(modsDir).some(
+          (f) => f.toLowerCase().includes('invsync') && f.endsWith('.jar')
+        )
+        if (hasInvsync) {
+          const settings = loadSettings()
+          if (settings.db?.installed) {
+            await doStartDb(settings.db, settings.baseDir || '')
+          }
+        }
+      }
+    } catch { /* DB 自動起動失敗は無視してサーバー起動を続行 */ }
+
+    // javaPath未指定の場合、管理済みJavaから自動選択（Java21 → Java17の順で優先）
+    let resolvedJavaPath = javaPath || null
+    if (!resolvedJavaPath) {
+      const settings = loadSettings()
+      const installations = settings.javaInstallations || []
+      const best = [25, 21, 17, 8].reduce((found, ver) => found || installations.find(j => j.majorVersion === ver), null)
+      if (best) resolvedJavaPath = best.path
+    }
+
+    const opts = { serverDir, serverType, jvmMemory, autoRestart: autoRestart || false, javaPath: resolvedJavaPath }
     serverSpawnOpts[serverId] = opts
     spawnServerProcess(serverId, opts)
     return true
@@ -1061,48 +1113,11 @@ app.whenReady().then(() => {
   // ─── DB 自動起動 ─────────────────────────────────────────────────────────
   // アプリ起動時にDBがインストール済みなら自動起動する
   const settingsOnStart = loadSettings()
-  if (settingsOnStart.db && settingsOnStart.db.installed && settingsOnStart.db.binDir) {
-    const autoStartDb = async () => {
-      try {
-        const binDir = settingsOnStart.db.binDir
-        const exe = join(binDir, 'mysqld.exe')
-        if (!existsSync(exe)) return
-        const dataDir = settingsOnStart.db.dataDir
-        const port = settingsOnStart.db.port || 3306
-        const proc = spawn(exe, [
-          `--datadir=${dataDir}`,
-          `--port=${port}`,
-          '--bind-address=127.0.0.1',
-          '--console',
-        ], { cwd: binDir })
-        proc.stdout?.setEncoding('utf8')
-        proc.stderr?.setEncoding('utf8')
-        const checkReady = (data) => {
-          if (data && data.includes('ready for connections')) {
-            dbProcess = proc
-            mainWindow?.webContents.send('db-status-changed', { running: true })
-          }
-        }
-        proc.stdout?.on('data', checkReady)
-        proc.stderr?.on('data', checkReady)
-        proc.on('close', () => {
-          if (dbProcess === proc) {
-            dbProcess = null
-            mainWindow?.webContents.send('db-status-changed', { running: false })
-          }
-        })
-        // 15秒タイムアウトで強制的にrunningとマーク（起動済みの場合）
-        setTimeout(() => {
-          if (!dbProcess && proc && !proc.killed) {
-            dbProcess = proc
-            mainWindow?.webContents.send('db-status-changed', { running: true })
-          }
-        }, 15000)
-      } catch { /* 自動起動失敗は無視 */ }
-    }
-    // ウィンドウが準備できてから起動
+  if (settingsOnStart.db?.installed && settingsOnStart.db?.binDir) {
     mainWindow.once('ready-to-show', () => {
-      setTimeout(autoStartDb, 1000)
+      setTimeout(() => {
+        doStartDb(settingsOnStart.db, settingsOnStart.baseDir || '').catch(() => { /* 無視 */ })
+      }, 1000)
     })
   }
 
@@ -1140,7 +1155,7 @@ app.whenReady().then(() => {
 bind = "0.0.0.0:${port || 25577}"
 motd = "${motd || 'A Velocity Proxy'}"
 show-max-players = ${maxPlayers || 500}
-online-mode = false
+online-mode = true
 force-key-authentication = false
 prevent-client-proxy-connections = false
 player-info-forwarding-mode = "${modeUpper}"
@@ -1178,7 +1193,33 @@ show-plugins = false
 `
     writeFileSync(join(velocityDir, 'velocity.toml'), toml, 'utf-8')
     if (forwardingSecret) {
-      writeFileSync(join(velocityDir, 'forwarding.secret'), forwardingSecret, 'utf-8')
+      const trimmedSecret = forwardingSecret.trim()
+      writeFileSync(join(velocityDir, 'forwarding.secret'), trimmedSecret, 'utf-8')
+      // バックエンドサーバーのフォワーディングシークレットも同期する
+      for (const srv of servers || []) {
+        if (!srv.serverDir) continue
+        const serverType = srv.type || 'fabric'
+        const configDir = join(srv.serverDir, 'config')
+        if (serverType === 'fabric') {
+          const ccPath = join(configDir, 'clusterconnect.json')
+          if (existsSync(ccPath)) {
+            try {
+              const cc = JSON.parse(readFileSync(ccPath, 'utf-8'))
+              cc.secret_key = trimmedSecret
+              writeFileSync(ccPath, JSON.stringify(cc, null, 2), 'utf-8')
+            } catch { /* 読み書き失敗は無視 */ }
+          }
+        } else if (serverType === 'paper') {
+          const paperGlobalPath = join(configDir, 'paper-global.yml')
+          if (existsSync(paperGlobalPath)) {
+            try {
+              let content = readFileSync(paperGlobalPath, 'utf-8')
+              content = content.replace(/(velocity:[\s\S]*?secret:\s*")[^"]*(")/m, `$1${trimmedSecret}$2`)
+              writeFileSync(paperGlobalPath, content, 'utf-8')
+            } catch { /* 読み書き失敗は無視 */ }
+          }
+        }
+      }
     }
     return true
   })
@@ -1202,13 +1243,14 @@ show-plugins = false
   ipcMain.handle('install-paper', async (_, { serverName, mcVersion, baseDir, clusterName, serverPort, voidWorld }) => {
     const { net } = await import('electron')
     const fs = require('fs')
+    const isCluster = clusterName && clusterName !== 'standalone'
     const clusterDir = join(baseDir, clusterName || 'standalone')
     const serverDir = join(clusterDir, serverName)
     if (!existsSync(serverDir)) mkdirSync(serverDir, { recursive: true })
     const send = (msg) => mainWindow.webContents.send('install-log', msg)
 
     const fetchJson = (url) => new Promise((resolve, reject) => {
-      const req = net.request({ url, headers: { 'User-Agent': 'minecraft-manager/1.0' } })
+      const req = net.request({ url, headers: { 'User-Agent': 'beacon/1.0' } })
       let d = ''
       req.on('response', (r) => {
         r.on('data', (c) => { d += c })
@@ -1243,7 +1285,7 @@ show-plugins = false
         'level-type': 'minecraft\\:flat',
         'generator-settings': '{"layers":[{"block":"minecraft:air","height":1}],"biome":"minecraft:the_void"}',
         'generate-structures': 'false',
-        'online-mode': 'false',
+        'online-mode': isCluster ? 'false' : 'true',
         'server-port': String(serverPort || 25565),
         'enforce-secure-profile': 'false',
         'prevent-proxy-connections': 'false',
@@ -1256,7 +1298,7 @@ show-plugins = false
         'gamemode': 'adventure',
       } : {
         'level-name': serverName,
-        'online-mode': 'false',
+        'online-mode': isCluster ? 'false' : 'true',
         'server-port': String(serverPort || 25565),
         'enforce-secure-profile': 'false',
         'prevent-proxy-connections': 'false',
@@ -1281,14 +1323,15 @@ show-plugins = false
     const configDir = join(serverDir, 'config')
     if (!existsSync(configDir)) mkdirSync(configDir, { recursive: true })
     const configPath = join(configDir, 'paper-global.yml')
+    const trimmedSecret = (forwardingSecret || '').trim()
     if (existsSync(configPath)) {
       let content = readFileSync(configPath, 'utf-8')
       content = content
         .replace('enabled: false\n    online-mode: true\n    secret: ""',
-          `enabled: true\n    online-mode: true\n    secret: "${forwardingSecret}"`)
+          `enabled: true\n    online-mode: true\n    secret: "${trimmedSecret}"`)
       writeFileSync(configPath, content, 'utf-8')
     } else {
-      const yaml = `_version: 30\nproxies:\n  bungee-cord:\n    online-mode: true\n  velocity:\n    enabled: true\n    online-mode: true\n    secret: "${forwardingSecret}"\n`
+      const yaml = `_version: 30\nproxies:\n  bungee-cord:\n    online-mode: true\n  velocity:\n    enabled: true\n    online-mode: true\n    secret: "${trimmedSecret}"\n`
       writeFileSync(configPath, yaml, 'utf-8')
     }
     return true
@@ -1516,7 +1559,7 @@ show-plugins = false
 async function modrinthFetch(url) {
   const { net } = await import('electron')
   return new Promise((resolve, reject) => {
-    const req = net.request({ url, headers: { 'User-Agent': 'nexus-mc/1.0 (github.com/Simohayhe/Minecraft-Manager)' } })
+    const req = net.request({ url, headers: { 'User-Agent': 'beacon/1.0 (github.com/Simohayhe/Beacon)' } })
     let d = ''
     req.on('response', r => {
       r.on('data', c => { d += c })
@@ -1532,7 +1575,7 @@ async function modrinthPost(url, body) {
   return new Promise((resolve, reject) => {
     const req = net.request({
       method: 'POST', url,
-      headers: { 'User-Agent': 'nexus-mc/1.0', 'Content-Type': 'application/json' }
+      headers: { 'User-Agent': 'beacon/1.0', 'Content-Type': 'application/json' }
     })
     let d = ''
     req.on('response', r => {
@@ -1764,7 +1807,7 @@ ipcMain.handle('install-java', async (_, { majorVersion }) => {
   mkdirSync(javaBaseDir, { recursive: true })
 
   const fetchJson = (url) => new Promise((resolve, reject) => {
-    const req = net.request({ url, headers: { 'User-Agent': 'nexus-mc/1.0' } })
+    const req = net.request({ url, headers: { 'User-Agent': 'beacon/1.0' } })
     let d = ''
     req.on('response', r => {
       r.on('data', c => { d += c })
@@ -1866,19 +1909,15 @@ ipcMain.handle('install-update', () => {
 // 必須Mod（ClusterConnect / FabricAPI）の存在確認
 ipcMain.handle('check-required-mods', (_, { serverDir, isCluster }) => {
   const modsDir = join(serverDir, 'mods')
-  if (!existsSync(modsDir)) return { ok: false, missing: ['FabricAPI', 'ClusterConnect', 'Invsync'] }
+  if (!existsSync(modsDir)) return { ok: false, missing: ['FabricAPI', 'ClusterConnect'] }
 
   const files = readdirSync(modsDir).filter(f => f.endsWith('.jar')).map(f => f.toLowerCase())
-  const hasFabricApi       = files.some(f => f.includes('fabric-api') || f.includes('fabricapi'))
-  const hasClusterConnect  = files.some(f => f.includes('clusterconnect'))
-  const hasInvsync         = files.some(f => f.includes('invsync'))
+  const hasFabricApi      = files.some(f => f.includes('fabric-api') || f.includes('fabricapi'))
+  const hasClusterConnect = files.some(f => f.includes('clusterconnect'))
 
   const missing = []
   if (!hasFabricApi) missing.push('FabricAPI')
-  if (isCluster) {
-    if (!hasClusterConnect) missing.push('ClusterConnect')
-    if (!hasInvsync) missing.push('Invsync')
-  }
+  if (isCluster && !hasClusterConnect) missing.push('ClusterConnect')
   return { ok: missing.length === 0, missing }
 })
 
@@ -1893,7 +1932,7 @@ ipcMain.handle('repair-required-mods', async (_, { serverDir, mcVersion, forward
   const send = (msg) => mainWindow?.webContents.send('install-log', msg)
 
   const fetchJson = (url) => new Promise((resolve, reject) => {
-    const req = net.request({ url, headers: { 'User-Agent': 'nexus-mc/1.0' } })
+    const req = net.request({ url, headers: { 'User-Agent': 'beacon/1.0' } })
     let d = ''; req.on('response', r => { r.on('data', c => { d += c }); r.on('end', () => { try { resolve(JSON.parse(d)) } catch (e) { reject(e) } }) }); req.on('error', reject); req.end()
   })
   const downloadFile = (url, filePath) => new Promise((resolve, reject) => {
@@ -1916,16 +1955,8 @@ ipcMain.handle('repair-required-mods', async (_, { serverDir, mcVersion, forward
       const rel = await fetchJson('https://api.github.com/repos/Simohayhe/ClusterConnectFabric/releases/latest')
       const asset = (rel.assets || []).find(a => a.name.endsWith('.jar'))
       if (asset) { await downloadFile(asset.browser_download_url, join(modsDir, asset.name)); results.push('ClusterConnect') }
-      if (forwardingSecret) writeFileSync(join(configDir, 'clusterconnect.json'), JSON.stringify({ secret_key: forwardingSecret }, null, 2), 'utf-8')
+      if (forwardingSecret) writeFileSync(join(configDir, 'clusterconnect.json'), JSON.stringify({ secret_key: forwardingSecret.trim() }, null, 2), 'utf-8')
     } catch (e) { send(`ClusterConnect 修復失敗: ${e.message}`) }
-  }
-  if (missingMods.includes('Invsync')) {
-    try {
-      send('Invsync を修復中...')
-      const rel = await fetchJson('https://api.github.com/repos/Simohayhe/Invsyncmod/releases/latest')
-      const asset = (rel.assets || []).find(a => a.name.endsWith('.jar'))
-      if (asset) { await downloadFile(asset.browser_download_url, join(modsDir, asset.name)); results.push('Invsync') }
-    } catch (e) { send(`Invsync 修復失敗: ${e.message}`) }
   }
   send('修復完了！')
   return { success: true, repaired: results }
@@ -1936,7 +1967,7 @@ ipcMain.handle('invsync-list-versions', async () => {
   try {
     const { net } = await import('electron')
     const fetchJson = (url) => new Promise((resolve, reject) => {
-      const req = net.request({ url, headers: { 'User-Agent': 'nexus-mc/1.0' } })
+      const req = net.request({ url, headers: { 'User-Agent': 'beacon/1.0' } })
       let d = ''; req.on('response', r => { r.on('data', c => { d += c }); r.on('end', () => { try { resolve(JSON.parse(d)) } catch (e) { reject(e) } }) }); req.on('error', reject); req.end()
     })
     const releases = await fetchJson('https://api.github.com/repos/Simohayhe/Invsyncmod/releases')
@@ -1950,21 +1981,44 @@ ipcMain.handle('invsync-list-versions', async () => {
   } catch { return [] }
 })
 
-// Invsync を指定サーバーにインストール
-ipcMain.handle('invsync-install', async (_, { serverDir, downloadUrl, fileName }) => {
+// Invsync を指定サーバーにインストール + invsyncmod.properties を自動生成
+ipcMain.handle('invsync-install', async (_, { serverDir, downloadUrl, fileName, serverName, clusterName }) => {
   try {
     const { net } = await import('electron')
     const fs = require('fs')
     const modsDir = join(serverDir, 'mods')
+    const configDir = join(serverDir, 'config')
     if (!existsSync(modsDir)) mkdirSync(modsDir, { recursive: true })
-    // 既存の Invsync jar を削除
-    const existing = readdirSync(modsDir).filter(f => f.toLowerCase().includes('invsync'))
+    if (!existsSync(configDir)) mkdirSync(configDir, { recursive: true })
+
+    // 既存の Invsync jar を削除してから新しいものをダウンロード
+    const existing = readdirSync(modsDir).filter(f => f.toLowerCase().includes('invsync') && f.endsWith('.jar'))
     for (const f of existing) unlinkSync(join(modsDir, f))
     const destPath = join(modsDir, fileName)
     await new Promise((resolve, reject) => {
       const req = net.request(downloadUrl)
       req.on('response', r => { const file = fs.createWriteStream(destPath); r.on('data', c => file.write(c)); r.on('end', () => { file.close(); resolve() }) }); req.on('error', reject); req.end()
     })
+
+    // invsyncmod.properties を DB 設定に合わせて自動生成
+    const db = loadSettings().db || {}
+    const dbName = clusterName
+      ? clusterName.replace(/[^a-zA-Z0-9_]/g, '_') + '_DB'
+      : 'minecraft_sync'
+    const srvName = serverName || serverDir.split(/[\\/]/).pop() || 'default'
+    const config = [
+      `server.name=${srvName}`,
+      `db.host=localhost`,
+      `db.port=${db.port || 3306}`,
+      `db.name=${dbName}`,
+      `db.user=root`,
+      `db.password=${db.password || ''}`,
+      ``,
+      `db.pool.max=10`,
+      `db.pool.timeout=30000`,
+    ].join('\n')
+    writeFileSync(join(configDir, 'invsyncmod.properties'), config, 'utf-8')
+
     return { success: true }
   } catch (e) { return { success: false, error: e.message } }
 })
@@ -1975,6 +2029,22 @@ ipcMain.handle('invsync-check', (_, { serverDir }) => {
   if (!existsSync(modsDir)) return { installed: false, fileName: null }
   const found = readdirSync(modsDir).find(f => f.toLowerCase().includes('invsync') && f.endsWith('.jar'))
   return { installed: !!found, fileName: found || null }
+})
+
+// Invsync アンインストール（jar + config 削除）
+ipcMain.handle('invsync-uninstall', (_, { serverDir }) => {
+  try {
+    const modsDir = join(serverDir, 'mods')
+    if (existsSync(modsDir)) {
+      const jars = readdirSync(modsDir).filter(f => f.toLowerCase().includes('invsync') && f.endsWith('.jar'))
+      for (const jar of jars) unlinkSync(join(modsDir, jar))
+    }
+    const configFile = join(serverDir, 'config', 'invsyncmod.properties')
+    if (existsSync(configFile)) unlinkSync(configFile)
+    return { success: true }
+  } catch (e) {
+    return { success: false, error: e.message }
+  }
 })
 
 // apply-server-mods: 必須Modはlibrary管理外でも削除しない
@@ -2044,7 +2114,7 @@ ipcMain.handle('diag-upnp-open-port', async (_, { port, protocol }) => {
         private: parseInt(port),
         ttl: 86400,
         protocol: (protocol || 'tcp').toUpperCase(),
-        description: `NexusMC-${port}`
+        description: `Beacon-${port}`
       }, (err) => {
         client.close()
         if (err) resolve({ success: false, error: err.message })
@@ -2063,7 +2133,7 @@ ipcMain.handle('diag-check-port-external', async (_, { port }) => {
   return new Promise((resolve) => {
     // ifconfig.co/port/{port} はリクエスト元IPのポートが開放されているかを外部からTCP確認する
     const url = `https://ifconfig.co/port/${port}`
-    const req = net.request({ url, headers: { 'User-Agent': 'nexus-mc/1.0', 'Accept': 'application/json' } })
+    const req = net.request({ url, headers: { 'User-Agent': 'beacon/1.0', 'Accept': 'application/json' } })
     let d = ''
     req.on('response', r => {
       r.on('data', c => { d += c })
@@ -2152,8 +2222,8 @@ ipcMain.handle('diag-upnp-check', () => {
       const client = natUpnp.createClient()
       client.getMappings((err, results) => {
         client.close()
-        if (err) resolve({ available: false, error: err.message })
-        else resolve({ available: true, mappingCount: (results || []).length })
+        if (err) resolve({ available: false, error: 'ルーターが UPnP に非対応か、無効になっています' })
+        else resolve({ available: true, count: (results || []).length })
       })
       setTimeout(() => {
         try { client.close() } catch { /* ignore */ }
@@ -2233,7 +2303,7 @@ ipcMain.handle('fetch-uuid', async (_, { username }) => {
   const { net } = await import('electron')
   return new Promise((resolve) => {
     const req = net.request(`https://api.mojang.com/users/profiles/minecraft/${encodeURIComponent(username)}`)
-    req.setHeader('User-Agent', 'NexusMC/1.0')
+    req.setHeader('User-Agent', 'beacon/1.0')
     req.on('response', (res) => {
       let data = ''
       res.on('data', chunk => { data += chunk })
@@ -2316,21 +2386,13 @@ app.on('window-all-closed', () => {
 })
 
 // ─── MariaDB Management ───────────────────────────────────────────────────────
-
-function getDbDirs(baseDir) {
-  const dbBase   = join(baseDir, DB_DIR_NAME)
-  const mariaDir = join(dbBase, 'mariadb')   // binaries
-  const dataDir  = join(dbBase, 'data')       // data directory
-  const mysqldExe = join(mariaDir, 'bin', 'mysqld.exe')
-  const mysqlExe  = join(mariaDir, 'bin', 'mysql.exe')
-  return { dbBase, mariaDir, dataDir, mysqldExe, mysqlExe }
-}
+// getDbDirs は utils.js から import
 
 // MariaDB ダウンロード URL を REST API から取得
 async function fetchMariaDbDownloadUrl() {
   const { net } = await import('electron')
   const fetchJson = (url) => new Promise((resolve, reject) => {
-    const req = net.request({ url, headers: { 'User-Agent': 'nexus-mc/1.0' } })
+    const req = net.request({ url, headers: { 'User-Agent': 'beacon/1.0' } })
     let d = ''
     req.on('response', r => { r.on('data', c => { d += c }); r.on('end', () => { try { resolve(JSON.parse(d)) } catch (e) { reject(e) } }) })
     req.on('error', reject)
@@ -2388,40 +2450,93 @@ ipcMain.handle('db-install', async (_, { baseDir, password }) => {
     })
 
     send('展開中...')
+    // 一時フォルダに展開してから内部ディレクトリを丸ごと移動（renameSync を確実に1回だけ使う）
+    const tempExtract = join(dbBase, '_tmp_extract')
+    if (existsSync(tempExtract)) rmSync(tempExtract, { recursive: true, force: true })
     if (existsSync(mariaDir)) rmSync(mariaDir, { recursive: true, force: true })
-    mkdirSync(mariaDir, { recursive: true })
+    mkdirSync(tempExtract, { recursive: true })
     await new Promise((resolve, reject) => {
       const ps = spawn('powershell', [
         '-NoProfile', '-NonInteractive', '-Command',
-        `Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${mariaDir}' -Force`
+        `Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${tempExtract}' -Force`
       ])
       ps.on('close', code => code === 0 ? resolve() : reject(new Error('展開に失敗')))
       ps.on('error', reject)
     })
-    // 展開後のサブフォルダを mariaDir 直下に移動（mariadb-x.x.x-winx64/bin/mysqld.exe → mariaDir/bin/mysqld.exe）
-    const inner = readdirSync(mariaDir).find(n => existsSync(join(mariaDir, n, 'bin', 'mysqld.exe')))
+    // 展開先の内部ディレクトリ（mariadb-x.x.x-winx64）を丸ごと mariaDir へ移動
+    const inner = readdirSync(tempExtract).find(n => existsSync(join(tempExtract, n, 'bin', 'mysqld.exe')))
     if (!inner) throw new Error('mysqld.exe が見つかりません')
-    const innerPath = join(mariaDir, inner)
-    for (const entry of readdirSync(innerPath)) {
-      const src = join(innerPath, entry), dst = join(mariaDir, entry)
-      if (!existsSync(dst)) {
-        try { fs.renameSync(src, dst) } catch { /* ignore */ }
-      }
-    }
-    try { rmSync(innerPath, { recursive: true, force: true }) } catch { /* ignore */ }
+    fs.renameSync(join(tempExtract, inner), mariaDir)
+    try { rmSync(tempExtract, { recursive: true, force: true }) } catch { /* ignore */ }
     try { unlinkSync(zipPath) } catch { /* ignore */ }
 
     send('データベースを初期化中...')
     mkdirSync(dataDir, { recursive: true })
     await new Promise((resolve, reject) => {
-      const initProc = spawn(join(mariaDir, 'bin', 'mysqld.exe'), [
-        `--datadir=${dataDir}`,
-        '--initialize-insecure',
-        '--user=root'
-      ], { cwd: join(mariaDir, 'bin') })
-      initProc.on('close', code => resolve(code))
-      initProc.on('error', reject)
+      // MariaDB on Windows の正式な初期化ツール mysql_install_db.exe を優先使用
+      // 存在しない場合は mysqld --initialize-insecure にフォールバック
+      const installDbExe = join(mariaDir, 'bin', 'mysql_install_db.exe')
+      const [initExe, initArgs] = existsSync(installDbExe)
+        ? [installDbExe, [`--datadir=${dataDir}`]]
+        : [join(mariaDir, 'bin', 'mysqld.exe'), [`--datadir=${dataDir}`, '--initialize-insecure', '--console']]
+
+      const initProc = spawn(initExe, initArgs, { cwd: join(mariaDir, 'bin') })
+      let output = ''
+      initProc.stdout?.setEncoding('utf8'); initProc.stderr?.setEncoding('utf8')
+      initProc.stdout?.on('data', d => { output += d })
+      initProc.stderr?.on('data', d => { output += d })
+      initProc.on('close', code => {
+        if (code !== 0) reject(new Error(`初期化失敗 (code: ${code})\n${output.slice(-500)}`))
+        else resolve()
+      })
+      initProc.on('error', (e) => reject(new Error(`初期化プロセス起動失敗: ${e.message}`)))
     })
+
+    // 初期化直後にMariaDBを一時起動してrootパスワードを設定する
+    // mysql_install_db は insecure（パスワードなし）で初期化するため、SQL で設定が必要
+    if (password) {
+      send('rootパスワードを設定中...')
+      await new Promise(async (resolve, reject) => {
+        const tempProc = spawn(mysqldExe, [
+          `--datadir=${dataDir}`,
+          '--port=3307',  // 既存の3306と衝突しないよう一時ポート使用
+          '--bind-address=127.0.0.1',
+          '--console',
+          '--skip-networking=OFF'
+        ], { cwd: join(mariaDir, 'bin') })
+        tempProc.stdout?.setEncoding('utf8'); tempProc.stderr?.setEncoding('utf8')
+        tempProc.stdout?.resume(); tempProc.stderr?.resume()
+
+        // ポートが開くまで待機（最大20秒）
+        const deadline = Date.now() + 20000
+        let portOpen = false
+        while (Date.now() < deadline) {
+          await new Promise(r => setTimeout(r, 600))
+          if (await checkDbPortOpen(3307)) { portOpen = true; break }
+          if (tempProc.exitCode !== null) break
+        }
+
+        if (portOpen) {
+          try {
+            const mysql = require('mysql2/promise')
+            // 初期化直後はrootパスワードなしで接続できる
+            const conn = await mysql.createConnection({ host: '127.0.0.1', port: 3307, user: 'root', password: '' })
+            await conn.execute(`ALTER USER 'root'@'localhost' IDENTIFIED BY ?`, [password])
+            await conn.execute('FLUSH PRIVILEGES')
+            await conn.end()
+            send('rootパスワードを設定しました')
+          } catch (e) {
+            send(`パスワード設定警告: ${e.message}`)
+          }
+        } else {
+          send('一時起動タイムアウト（パスワード設定をスキップ）')
+        }
+
+        try { tempProc.kill() } catch { /* ignore */ }
+        await new Promise(r => setTimeout(r, 1000))
+        resolve()
+      })
+    }
 
     // 設定保存
     const settings = loadSettings()
@@ -2440,46 +2555,10 @@ ipcMain.handle('db-install', async (_, { baseDir, password }) => {
 
 // MariaDB 起動
 ipcMain.handle('db-start', async (_, { baseDir }) => {
-  if (dbProcess) return { success: true, alreadyRunning: true }
   const settings = loadSettings()
   const db = settings.db
   if (!db?.installed) return { success: false, error: 'MariaDB がインストールされていません' }
-
-  const { dataDir, mysqldExe } = getDbDirs(baseDir)
-  const binDir = db.binDir || join(baseDir, DB_DIR_NAME, 'mariadb', 'bin')
-  const exe = existsSync(mysqldExe) ? mysqldExe : join(binDir, 'mysqld.exe')
-
-  return new Promise((resolve) => {
-    const proc = spawn(exe, [
-      `--datadir=${db.dataDir || dataDir}`,
-      `--port=${db.port || 3306}`,
-      '--bind-address=127.0.0.1',
-      '--console'
-    ], { cwd: binDir })
-    dbProcess = proc
-    let started = false
-    const checkReady = (msg) => {
-      if (!started && (msg.includes('ready for connections') || msg.includes('socket created'))) {
-        started = true
-        mainWindow?.webContents.send('db-status-changed', { running: true })
-        resolve({ success: true })
-      }
-    }
-    proc.stdout.setEncoding('utf8'); proc.stderr.setEncoding('utf8')
-    proc.stdout.on('data', checkReady); proc.stderr.on('data', checkReady)
-    proc.on('close', () => {
-      dbProcess = null
-      mainWindow?.webContents.send('db-status-changed', { running: false })
-    })
-    proc.on('error', (e) => {
-      dbProcess = null
-      if (!started) resolve({ success: false, error: e.message })
-    })
-    // 10秒でタイムアウト（起動完了メッセージが来なくても続行）
-    setTimeout(() => {
-      if (!started) { started = true; resolve({ success: true, timedOut: true }) }
-    }, 10000)
-  })
+  return doStartDb(db, baseDir)
 })
 
 // MariaDB 停止
@@ -2490,8 +2569,15 @@ ipcMain.handle('db-stop', () => {
   return true
 })
 
-// MariaDB 稼働状態
-ipcMain.handle('db-status', () => ({ running: !!dbProcess }))
+// MariaDB 稼働状態（TCP ポートチェック + 最後のエラーを返す）
+ipcMain.handle('db-status', async () => {
+  const settings = loadSettings()
+  const port = settings.db?.port || 3306
+  const open = await checkDbPortOpen(port)
+  if (!open && dbProcess) { dbProcess = null }
+  if (open) dbLastError = null
+  return { running: open, error: open ? null : dbLastError }
+})
 
 // MariaDB インストール確認
 ipcMain.handle('db-check-install', (_, { baseDir }) => {
@@ -2500,18 +2586,38 @@ ipcMain.handle('db-check-install', (_, { baseDir }) => {
   return { installed: existsSync(mysqldExe), hasSettings: !!settings.db?.installed }
 })
 
+// MariaDB に root で接続するヘルパー（パスワード未設定時は空パスで接続して自動設定）
+async function connectAsRoot(db) {
+  const mysql = require('mysql2/promise')
+  const port = db.port || 3306
+  const password = db.password || ''
+  try {
+    return await mysql.createConnection({ host: '127.0.0.1', port, user: 'root', password })
+  } catch (e) {
+    if (e.code === 'ER_ACCESS_DENIED_ERROR' && password) {
+      // パスワードなしで接続を試みてパスワードを設定する
+      const conn = await mysql.createConnection({ host: '127.0.0.1', port, user: 'root', password: '' })
+      // ALTER USER は ? プレースホルダー非対応のため escape を使用
+      const escaped = conn.escape(password)
+      await conn.query(`ALTER USER 'root'@'localhost' IDENTIFIED BY ${escaped}`)
+      await conn.query('FLUSH PRIVILEGES')
+      await conn.end()
+      // 設定したパスワードで再接続
+      return await mysql.createConnection({ host: '127.0.0.1', port, user: 'root', password })
+    }
+    throw e
+  }
+}
+
 // クラスター用 DB スキーマ作成
 ipcMain.handle('db-create-schema', async (_, { clusterName }) => {
-  if (!dbProcess) return { success: false, error: 'DB が起動していません' }
   const settings = loadSettings()
   const db = settings.db
+  const port = db?.port || 3306
+  if (!(await checkDbPortOpen(port))) return { success: false, error: 'DB が起動していません' }
   if (!db) return { success: false, error: 'DB 設定がありません' }
   try {
-    const mysql = require('mysql2/promise')
-    const conn = await mysql.createConnection({
-      host: '127.0.0.1', port: db.port || 3306,
-      user: 'root', password: db.password
-    })
+    const conn = await connectAsRoot(db)
     const schemaName = `${clusterName}_DB`.replace(/[^a-zA-Z0-9_]/g, '_')
     await conn.execute(`CREATE DATABASE IF NOT EXISTS \`${schemaName}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`)
     await conn.end()
@@ -2547,34 +2653,174 @@ ipcMain.handle('db-get-settings', () => {
   return settings.db || null
 })
 
-// ─── 終了ブロック: DBが動いていてクラスターサーバーが起動中なら終了を阻止 ──────
+// MariaDB バージョン取得
+ipcMain.handle('db-get-version', async () => {
+  const settings = loadSettings()
+  const db = settings.db
+  const port = db?.port || 3306
+  // 起動中ならSQLでバージョン取得
+  if (await checkDbPortOpen(port)) {
+    try {
+      const conn = await connectAsRoot(db)
+      const [rows] = await conn.query('SELECT VERSION() AS v')
+      await conn.end()
+      return rows[0]?.v || null
+    } catch { /* fallthrough */ }
+  }
+  // 停止中でも mysqld --version で取得
+  if (db?.binDir) {
+    const mysqldExe = join(db.binDir, 'mysqld.exe')
+    if (existsSync(mysqldExe)) {
+      return await new Promise(resolve => {
+        const proc = spawn(mysqldExe, ['--version'])
+        let out = ''
+        proc.stdout?.setEncoding('utf8'); proc.stderr?.setEncoding('utf8')
+        proc.stdout?.on('data', d => { out += d })
+        proc.stderr?.on('data', d => { out += d })
+        proc.on('close', () => {
+          const m = out.match(/Ver\s+([\d.]+(-MariaDB)?)/i)
+          resolve(m ? m[0].replace('Ver ', '') : out.trim().split('\n')[0] || null)
+        })
+        proc.on('error', () => resolve(null))
+      })
+    }
+  }
+  return null
+})
+
+// アプリ再起動
+ipcMain.handle('restart-app', () => {
+  app.relaunch()
+  app.exit(0)
+})
+
+// ─── パフォーマンス統計 ────────────────────────────────────────────────────────
+
+// CPU計算用の履歴 { pid: { cpuMs, wallMs } }
+const cpuHistory = {}
+
+ipcMain.handle('get-process-stats', async (_, { serverIds }) => {
+  const { execFile } = require('child_process')
+  const os = require('os')
+
+  // serverId → pid マッピング（起動中のみ）
+  const pidEntries = serverIds
+    .map(id => ({ id, pid: processes[id]?.pid }))
+    .filter(e => e.pid)
+
+  if (pidEntries.length === 0) return {}
+
+  const pidsArg = pidEntries.map(e => e.pid).join(',')
+  const script = `@(${pidsArg}) | ForEach-Object { $p = Get-Process -Id $_ -ErrorAction SilentlyContinue; if ($p) { "$_ $($p.WorkingSet64) $($p.TotalProcessorTime.TotalMilliseconds)" } }`
+
+  const raw = await new Promise(resolve => {
+    execFile('powershell', ['-NoProfile', '-NonInteractive', '-Command', script],
+      { timeout: 6000 },
+      (_, stdout) => resolve(stdout || ''))
+  })
+
+  const pidStats = {}
+  const now = Date.now()
+  const numCores = os.cpus().length
+  for (const line of raw.trim().split('\n')) {
+    const parts = line.trim().split(' ')
+    if (parts.length < 3) continue
+    const pid = parseInt(parts[0])
+    const memory = parseInt(parts[1]) || 0
+    const cpuTime = parseFloat(parts[2]) || 0
+    let cpu = 0
+    if (cpuHistory[pid]) {
+      const dt = now - cpuHistory[pid].wallMs
+      const dCpu = cpuTime - cpuHistory[pid].cpuMs
+      if (dt > 0) cpu = Math.min(100, (dCpu / dt / numCores) * 100)
+    }
+    cpuHistory[pid] = { cpuMs: cpuTime, wallMs: now }
+    pidStats[pid] = { memory, cpu: Math.round(cpu * 10) / 10 }
+  }
+
+  const result = {}
+  for (const { id, pid } of pidEntries) {
+    result[id] = pidStats[pid] || null
+  }
+  return result
+})
+
+// ディレクトリの合計サイズ（bytes）
+ipcMain.handle('get-dir-size', (_, { dir }) => {
+  if (!existsSync(dir)) return { bytes: 0 }
+  let total = 0
+  const walk = (d) => {
+    try {
+      for (const entry of readdirSync(d, { withFileTypes: true })) {
+        const p = join(d, entry.name)
+        if (entry.isDirectory()) walk(p)
+        else {
+          try { total += statSync(p).size } catch { /* skip */ }
+        }
+      }
+    } catch { /* アクセス不可フォルダをスキップ */ }
+  }
+  walk(dir)
+  return { bytes: total }
+})
+
+// ─── 終了ブロック: 共有設定（Invsync）ONのサーバーが起動中なら終了を阻止 ──────
 app.on('before-quit', (event) => {
   const runningServerIds = Object.keys(processes).filter(k => !k.startsWith('velocity-'))
 
-  // DB が動いていてクラスター配下のサーバーが起動中なら終了を阻止
-  if (dbProcess && runningServerIds.length > 0) {
+  if (runningServerIds.length > 0) {
     const data = loadData()
-    // クラスター配下のサーバーのみを対象にする（SQL使用サーバー）
-    const runningClusterServers = []
+    const runningInvsyncServers = []
+
     for (const id of runningServerIds) {
+      let serverDir = null, serverName = null, clusterName = null
+
+      // クラスター内を検索
       for (const cluster of data.clusters || []) {
         const srv = (cluster.servers || []).find(s => s.id === id)
-        if (srv) {
-          runningClusterServers.push({ clusterName: cluster.name, serverName: srv.name })
+        if (srv?.serverDir) {
+          serverDir = srv.serverDir; serverName = srv.name; clusterName = cluster.name
           break
         }
       }
+      // スタンドアロンを検索
+      if (!serverDir) {
+        for (const srv of data.standalone || []) {
+          if (srv.id === id && srv.serverDir) {
+            serverDir = srv.serverDir; serverName = srv.name
+            break
+          }
+        }
+      }
+
+      // Invsync jar が mods/ にあるか確認
+      if (serverDir) {
+        try {
+          const modsDir = join(serverDir, 'mods')
+          if (existsSync(modsDir)) {
+            const hasInvsync = readdirSync(modsDir).some(
+              f => f.toLowerCase().includes('invsync') && f.endsWith('.jar')
+            )
+            if (hasInvsync) runningInvsyncServers.push({ serverName, clusterName })
+          }
+        } catch { /* ignore */ }
+      }
     }
-    if (runningClusterServers.length > 0) {
+
+    if (runningInvsyncServers.length > 0) {
       event.preventDefault()
-      const detail = runningClusterServers
-        .map(({ clusterName, serverName }) => `・クラスター「${clusterName}」のサーバー「${serverName}」`)
+      const detail = runningInvsyncServers
+        .map(({ clusterName, serverName }) =>
+          clusterName
+            ? `・クラスター「${clusterName}」のサーバー「${serverName}」`
+            : `・サーバー「${serverName}」`
+        )
         .join('\n')
       dialog.showMessageBox(mainWindow, {
         type: 'warning',
         buttons: ['OK'],
         title: '終了できません',
-        message: 'DBを使用しているサーバーが起動中のため終了できません。\nサーバーを停止してからアプリを終了してください。',
+        message: 'インベントリ共有（Invsync）が有効なサーバーが起動中のため終了できません。\nサーバーを停止してからアプリを終了してください。',
         detail
       })
       return

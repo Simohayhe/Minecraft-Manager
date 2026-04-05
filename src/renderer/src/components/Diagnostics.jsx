@@ -27,203 +27,24 @@ function CopyBtn({ text }) {
   return <button className="diag-copy-btn" onClick={copy}>{copied ? '✓' : 'コピー'}</button>
 }
 
-// ─── ポート開放チェックセクション ────────────────────────────────────────────
-function PortCheckSection({ globalIp, allPorts }) {
-  const [ip, setIp] = useState('')
-  const [portMode, setPortMode] = useState('custom') // 'custom' | serverId
-  const [customPort, setCustomPort] = useState('')
-  const [checking, setChecking] = useState(false)
-  const [result, setResult] = useState(null) // { reachable, ip, port } | { error }
-
-  useEffect(() => {
-    if (globalIp && globalIp !== '取得中...' && globalIp !== '取得失敗') {
-      setIp(globalIp)
-    }
-  }, [globalIp])
-
-  // フラットなポート一覧
-  const flatPorts = []
-  for (const c of allPorts?.clusters || []) {
-    if (c.velocityPort) flatPorts.push({ id: `vel-${c.id}`, label: `${c.name} (Velocity)`, port: c.velocityPort })
-    for (const s of c.servers || []) {
-      if (s.port) flatPorts.push({ id: s.id, label: `${c.name} > ${s.name}`, port: s.port })
-    }
-  }
-  for (const s of allPorts?.standalone || []) {
-    if (s.port) flatPorts.push({ id: s.id, label: s.name, port: s.port })
-  }
-
-  const resolvedPort = portMode === 'custom'
-    ? parseInt(customPort) || null
-    : flatPorts.find(p => p.id === portMode)?.port || null
-
-  const resetIp = async () => {
-    setIp('取得中...')
-    const gip = await window.api.fetchGlobalIp()
-    setIp(gip)
-  }
-
-  const checkPort = async () => {
-    if (!resolvedPort || !ip.trim()) return
-    setChecking(true)
-    setResult(null)
-    const res = await window.api.diagCheckPortExternal({ port: resolvedPort })
-    setResult(res)
-    setChecking(false)
-  }
-
-  return (
-    <div className="diag-card">
-      <div className="diag-card-title">🔌 ポート開放チェック</div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-        {/* IP 入力 */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{ fontSize: 12, color: 'var(--text-muted)', minWidth: 70 }}>IPアドレス</span>
-          <input
-            className="modal-input"
-            style={{ flex: 1 }}
-            value={ip}
-            onChange={e => setIp(e.target.value)}
-            placeholder="グローバルIPアドレス"
-          />
-          <button className="btn btn-restart" style={{ fontSize: 12, whiteSpace: 'nowrap' }} onClick={resetIp}>
-            デフォルトに戻す
-          </button>
-        </div>
-
-        {/* ポート選択 */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{ fontSize: 12, color: 'var(--text-muted)', minWidth: 70 }}>ポート</span>
-          <select
-            className="modal-input"
-            style={{ flex: 1 }}
-            value={portMode}
-            onChange={e => setPortMode(e.target.value)}
-          >
-            <option value="custom">手動入力</option>
-            {flatPorts.map(p => (
-              <option key={p.id} value={p.id}>{p.label} ({p.port})</option>
-            ))}
-          </select>
-          {portMode === 'custom' && (
-            <input
-              className="modal-input"
-              style={{ width: 100 }}
-              type="number"
-              value={customPort}
-              onChange={e => setCustomPort(e.target.value)}
-              placeholder="25565"
-            />
-          )}
-        </div>
-
-        {/* チェックボタン */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <button
-            className="btn btn-start"
-            onClick={checkPort}
-            disabled={checking || !resolvedPort || !ip.trim()}
-            style={{ fontSize: 12 }}
-          >
-            {checking ? '確認中...' : '🔍 開放チェック'}
-          </button>
-          {resolvedPort && ip && (
-            <span style={{ fontSize: 12, color: 'var(--text-dim)' }}>
-              {ip}:{resolvedPort}
-            </span>
-          )}
-        </div>
-
-        {/* 結果 */}
-        {result && (
-          <div style={{
-            padding: '10px 14px', borderRadius: 8, fontSize: 13, fontWeight: 600,
-            background: result.success && result.reachable ? 'rgba(34,197,94,0.1)' : 'rgba(239,68,68,0.1)',
-            border: `1px solid ${result.success && result.reachable ? 'rgba(34,197,94,0.3)' : 'rgba(239,68,68,0.25)'}`,
-            color: result.success && result.reachable ? '#15803d' : '#b91c1c',
-          }}>
-            {!result.success
-              ? `⚠ チェック失敗: ${result.error}`
-              : result.reachable
-                ? `✅ ポート ${result.port} は外部から到達可能です`
-                : `❌ ポート ${result.port} は外部から到達できません（ファイアウォールまたはルーターの設定を確認してください）`
-            }
-          </div>
-        )}
-      </div>
-    </div>
-  )
-}
-
-// ─── 回線速度計測セクション ──────────────────────────────────────────────────
-function SpeedSection() {
-  const [status, setStatus] = useState('idle') // 'idle' | 'running' | 'done' | 'error'
-  const [result, setResult] = useState(null)
-
-  const measure = async () => {
-    setStatus('running')
-    setResult(null)
-    const res = await window.api.checkInternetSpeed()
-    setResult(res)
-    setStatus(res.success ? 'done' : 'error')
-  }
-
-  const speedColor = (mbps) => {
-    if (mbps >= 100) return '#22c55e'
-    if (mbps >= 30) return '#eab308'
-    return '#ef4444'
-  }
-
-  return (
-    <div className="diag-card">
-      <div className="diag-card-title">📡 回線速度</div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-        <button
-          className="btn btn-restart"
-          onClick={measure}
-          disabled={status === 'running'}
-          style={{ fontSize: 12 }}
-        >
-          {status === 'running' ? '計測中...' : '⚡ 速度を計測'}
-        </button>
-        {status === 'running' && (
-          <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>約30秒かかる場合があります</span>
-        )}
-        {status === 'done' && result?.success && (
-          <div style={{ display: 'flex', gap: 24, alignItems: 'center' }}>
-            <span style={{ fontSize: 22, fontWeight: 700, color: speedColor(result.mbps) }}>
-              {result.mbps} <span style={{ fontSize: 14 }}>Mbps</span>
-            </span>
-            <span style={{ fontSize: 12, color: 'var(--text-dim)' }}>
-              {(result.bytes / 1_000_000).toFixed(1)} MB / {result.elapsed}s
-            </span>
-          </div>
-        )}
-        {status === 'error' && (
-          <span style={{ fontSize: 13, color: '#ef4444' }}>⚠ 計測失敗: {result?.error}</span>
-        )}
-      </div>
-    </div>
-  )
-}
-
 export default function Diagnostics() {
   const [baseDir, setBaseDir]         = useState('')
   const [dbInstalled, setDbInstalled] = useState(false)
   const [dbRunning, setDbRunning]     = useState(false)
   const [localIp, setLocalIp]         = useState('')
   const [globalIp, setGlobalIp]       = useState('')
-  const [allPorts, setAllPorts]       = useState(null)
 
-  const [upnpSig, setUpnpSig]       = useState(STATUS.IDLE)
-  const [upnpDetail, setUpnpDetail] = useState('')
+  const [upnpSig, setUpnpSig]           = useState(STATUS.IDLE)
+  const [upnpDetail, setUpnpDetail]     = useState('')
+  const [upnpMappings, setUpnpMappings] = useState([])
+  const [deletingPort, setDeletingPort] = useState(null)
+  const [showUpnpModal, setShowUpnpModal] = useState(false)
 
   const baseDirSig = baseDir ? STATUS.OK : STATUS.ERROR
   const dbSig      = !dbInstalled ? STATUS.ERROR : dbRunning ? STATUS.OK : STATUS.WARN
   const localSig   = localIp && localIp !== '取得失敗' ? STATUS.OK : STATUS.ERROR
   const globalSig  = globalIp && globalIp !== '取得失敗' ? STATUS.OK : STATUS.ERROR
 
-  const checks = [baseDirSig, dbSig, localSig, globalSig, upnpSig].map(s => s === STATUS.OK || s === STATUS.WARN)
   const errorChecks = [baseDirSig, dbSig, localSig, globalSig, upnpSig].filter(s => s === STATUS.ERROR).length
   const allOk = errorChecks === 0 && upnpSig !== STATUS.IDLE && upnpSig !== STATUS.LOADING
 
@@ -240,15 +61,16 @@ export default function Diagnostics() {
     setLocalIp(lip)
     const gip = await window.api.fetchGlobalIp()
     setGlobalIp(gip)
-    const ports = await window.api.getAllServerPorts()
-    setAllPorts(ports)
 
     setUpnpSig(STATUS.LOADING)
     setUpnpDetail('')
+    setUpnpMappings([])
     const upnp = await window.api.diagUpnpCheck()
     if (upnp.available) {
       setUpnpSig(STATUS.OK)
       setUpnpDetail(`ルーターが UPnP に対応しています（マッピング数: ${upnp.count ?? 0}）`)
+      const mappings = await window.api.diagUpnpListMapped()
+      setUpnpMappings(mappings || [])
     } else {
       setUpnpSig(STATUS.WARN)
       setUpnpDetail(upnp.error || 'ルーターが UPnP に非対応か、無効になっています')
@@ -298,6 +120,16 @@ export default function Diagnostics() {
             <span className="diag-signal-value">
               {upnpSig === STATUS.IDLE ? '' : upnpSig === STATUS.LOADING ? '確認中...' : upnpDetail}
             </span>
+            {upnpMappings.length > 0 && (
+              <button
+                onClick={() => setShowUpnpModal(true)}
+                style={{ marginLeft: 8, fontSize: 12, padding: '2px 10px', borderRadius: 4,
+                  background: 'rgba(34,197,94,0.1)', border: '1px solid rgba(34,197,94,0.3)',
+                  color: '#15803d', cursor: 'pointer' }}
+              >
+                一覧を表示
+              </button>
+            )}
           </Signal>
         </div>
 
@@ -310,11 +142,48 @@ export default function Diagnostics() {
         </div>
       </div>
 
-      {/* 回線速度 */}
-      <SpeedSection />
-
-      {/* ポート開放チェック */}
-      <PortCheckSection globalIp={globalIp} allPorts={allPorts} />
+      {/* UPnP マッピング一覧モーダル */}
+      {showUpnpModal && (
+        <div className="modal-overlay" onClick={() => setShowUpnpModal(false)}>
+          <div className="modal" style={{ width: 480 }} onClick={e => e.stopPropagation()}>
+            <div className="modal-title">UPnP マッピング一覧</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4 }}>
+              {upnpMappings.length === 0 ? (
+                <div style={{ fontSize: 13, color: 'var(--text-muted)', padding: '12px 0' }}>マッピングがありません</div>
+              ) : upnpMappings.map((m, i) => (
+                <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10,
+                  padding: '8px 12px', borderRadius: 8,
+                  background: 'var(--bg-section)', border: '1px solid var(--border)' }}>
+                  <span style={{ fontFamily: 'monospace', fontSize: 13, minWidth: 90, color: 'var(--text)' }}>
+                    {m.protocol?.toUpperCase()} :{m.port}
+                  </span>
+                  <span style={{ flex: 1, fontSize: 12, color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {m.description || '—'}
+                  </span>
+                  <button
+                    className="btn btn-delete"
+                    style={{ fontSize: 12, padding: '3px 12px' }}
+                    disabled={deletingPort === `${m.port}-${m.protocol}`}
+                    onClick={async () => {
+                      setDeletingPort(`${m.port}-${m.protocol}`)
+                      await window.api.diagUpnpClosePort({ port: m.port, protocol: m.protocol || 'tcp' })
+                      const next = upnpMappings.filter((_, j) => j !== i)
+                      setUpnpMappings(next)
+                      setUpnpDetail(`ルーターが UPnP に対応しています（マッピング数: ${next.length}）`)
+                      setDeletingPort(null)
+                    }}
+                  >
+                    {deletingPort === `${m.port}-${m.protocol}` ? '削除中...' : '削除'}
+                  </button>
+                </div>
+              ))}
+            </div>
+            <div style={{ marginTop: 16, display: 'flex', justifyContent: 'flex-end' }}>
+              <button className="btn btn-restart" onClick={() => setShowUpnpModal(false)}>閉じる</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

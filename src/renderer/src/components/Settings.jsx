@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 
 // Java バージョンバッジの色
 const JAVA_VERSION_COLORS = {
@@ -99,7 +99,7 @@ function JavaSection() {
       saveJavas(next); return next
     })
   }
-  const MANAGED_VERSIONS = [21, 17]
+  const MANAGED_VERSIONS = [25, 21, 17, 8]
 
   return (
     <div className="settings-section">
@@ -200,16 +200,19 @@ function JavaSection() {
 }
 
 // ─── MariaDB 管理セクション ─────────────────────────────────────────────────
-function DbSection({ baseDir }) {
+function DbSection({ baseDir, needsRestart, setNeedsRestart }) {
   const [dbInstalled, setDbInstalled]   = useState(false)
   const [dbRunning, setDbRunning]       = useState(false)
+  const [dbError, setDbError]           = useState(null)
   const [dbSettings, setDbSettings]     = useState(null)
   const [dbPassword, setDbPassword]     = useState('')
   const [dbInstallLog, setDbInstallLog] = useState([])
   const [dbInstalling, setDbInstalling] = useState(false)
   const [dbInstallPct, setDbInstallPct] = useState(0)
+  const [showDbPassword, setShowDbPassword] = useState(false)
   const [showDel, setShowDel]           = useState(false)
   const [delStep2, setDelStep2]         = useState(false)
+  const [dbVersion, setDbVersion]       = useState(null)
 
   const load = useCallback(async () => {
     const db = await window.api.dbGetSettings()
@@ -220,16 +223,24 @@ function DbSection({ baseDir }) {
     }
     const st = await window.api.dbStatus()
     setDbRunning(st.running)
+    if (st.running) setDbError(null)
+    else if (st.error) setDbError(st.error)
+    const ver = await window.api.dbGetVersion()
+    setDbVersion(ver)
   }, [baseDir])
 
   useEffect(() => {
     load()
-    const u1 = window.api.onDbStatusChanged((info) => setDbRunning(info.running))
+    const u1 = window.api.onDbStatusChanged((info) => {
+      setDbRunning(info.running)
+      if (info.running) setDbError(null)
+      else if (info.error) setDbError(info.error)
+    })
     const u2 = window.api.onDbInstallLog((msg) => setDbInstallLog(prev => [...prev, msg]))
     const u3 = window.api.onDbInstallProgress((info) => setDbInstallPct(info.percent || 0))
     const u4 = window.api.onDbInstallDone((info) => {
       setDbInstalling(false)
-      if (info.success) { setDbInstalled(true); load() }
+      if (info.success) { setDbInstalled(true); setNeedsRestart(true); load() }
     })
     return () => { u1(); u2(); u3(); u4() }
   }, [load])
@@ -240,8 +251,6 @@ function DbSection({ baseDir }) {
     setDbInstallLog([]); setDbInstallPct(0); setDbInstalling(true); setDbPassword(pass)
     await window.api.dbInstall({ baseDir, password: pass })
   }
-  const startDb = async () => { await window.api.dbStart({ baseDir }); load() }
-  const stopDb  = async () => { await window.api.dbStop(); load() }
   const deleteDb = async () => {
     if (!delStep2) { setDelStep2(true); return }
     const res = await window.api.dbDelete({ baseDir })
@@ -252,6 +261,40 @@ function DbSection({ baseDir }) {
   }
 
   const baseDirMissing = !baseDir
+
+  if (needsRestart) {
+    return (
+      <div style={{
+        display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+        gap: 20, padding: '48px 24px', textAlign: 'center',
+        background: 'var(--bg-card)', border: '1px solid rgba(34,197,94,0.3)',
+        borderRadius: 12, marginTop: 16,
+      }}>
+        <div style={{ fontSize: 48 }}>✅</div>
+        <div style={{ fontSize: 16, fontWeight: 700, color: 'var(--text)' }}>
+          MariaDB のインストールが完了しました
+        </div>
+        <div style={{ fontSize: 13, color: 'var(--text-muted)', lineHeight: 1.7 }}>
+          DBを自動起動するにはアプリの再起動が必要です。<br />
+          再起動してもよろしいですか？
+        </div>
+        <button
+          className="btn btn-start"
+          style={{ fontSize: 14, padding: '10px 32px' }}
+          onClick={() => window.api.restartApp()}
+        >
+          🔄 今すぐ再起動
+        </button>
+        <button
+          className="btn"
+          style={{ fontSize: 12, color: 'var(--text-muted)' }}
+          onClick={() => setNeedsRestart(false)}
+        >
+          後で再起動する
+        </button>
+      </div>
+    )
+  }
 
   return (
     <div className="settings-section">
@@ -307,12 +350,24 @@ function DbSection({ baseDir }) {
       ) : (
         <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
           {/* ステータス表示 */}
-          <div style={{ background: 'var(--bg-section)', border: '1px solid var(--border)', borderRadius: 8, padding: '10px 14px', display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <div style={{
+            background: 'var(--bg-section)',
+            border: `1px solid ${dbError ? 'rgba(239,68,68,0.35)' : 'var(--border)'}`,
+            borderRadius: 8, padding: '10px 14px', display: 'flex', flexDirection: 'column', gap: 4
+          }}>
             {[
-              ['状態', <span key="s" style={{ color: dbRunning ? '#22c55e' : '#ef4444', fontWeight: 700 }}>{dbRunning ? '● 稼働中' : '● 停止中'}</span>],
+              ['状態', <span key="s" style={{
+                color: dbRunning ? '#22c55e' : dbError ? '#ef4444' : '#6b7280', fontWeight: 700
+              }}>
+                {dbRunning ? '● 稼働中' : dbError ? '⚠ 起動エラー' : '● 停止中'}
+              </span>],
+              ['バージョン', dbVersion || '取得中...'],
               ['ホスト', `localhost:${dbSettings?.port || 3306}`],
               ['ユーザー', 'root'],
-              ['パスワード', '●'.repeat(dbSettings?.password?.length || 8)],
+              ['パスワード', <span key="pw" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ fontFamily: 'monospace' }}>{showDbPassword ? (dbSettings?.password || '') : '●'.repeat(dbSettings?.password?.length || 8)}</span>
+                <button onClick={() => setShowDbPassword(v => !v)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', fontSize: 11, padding: '0 4px' }}>{showDbPassword ? '🙈 隠す' : '👁 表示'}</button>
+              </span>],
             ].map(([k, v]) => (
               <div key={k} style={{ display: 'flex', gap: 16, fontSize: 12 }}>
                 <span style={{ minWidth: 80, color: 'var(--text-muted)', fontWeight: 600 }}>{k}</span>
@@ -320,11 +375,22 @@ function DbSection({ baseDir }) {
               </div>
             ))}
           </div>
+          {dbError && (
+            <div style={{ fontSize: 12, color: '#ef4444', padding: '8px 12px', borderRadius: 6, background: 'rgba(239,68,68,0.07)', border: '1px solid rgba(239,68,68,0.2)', lineHeight: 1.6, wordBreak: 'break-all' }}>
+              <div style={{ fontWeight: 700, marginBottom: 4 }}>⚠ DBの自動起動に失敗しました</div>
+              <div style={{ color: 'var(--text-muted)', marginBottom: 6 }}>{dbError}</div>
+              {(dbError.includes("doesn't exist") || dbError.includes('privilege tables') || dbError.includes('初期化')) && (
+                <div style={{ color: '#b45309', background: 'rgba(251,191,36,0.1)', border: '1px solid rgba(251,191,36,0.3)', borderRadius: 4, padding: '6px 8px', marginTop: 4 }}>
+                  💡 DBが正しく初期化されていません。下の「削除」ボタンでDBを削除してから、再インストールしてください。
+                </div>
+              )}
+            </div>
+          )}
           {/* アクションボタン */}
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            {!dbRunning
-              ? <button className="btn btn-start" onClick={startDb}>▶ 起動</button>
-              : <button className="btn btn-stop" onClick={stopDb}>⏹ 停止</button>}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: '4px 0' }}>
+              ※ DBはアプリ起動時に自動で起動し、終了時に自動で停止します
+            </div>
             {!showDel ? (
               <button className="btn btn-delete" onClick={() => setShowDel(true)}>🗑 削除</button>
             ) : (
@@ -420,12 +486,11 @@ function PortSection() {
 
   const getFlatPorts = (d) => {
     const ports = []
+    // クラスター配下のサーバーはVelocity経由のため個別ポート開放不要
+    // Velocityポートのみ表示
     for (const cluster of d?.clusters || []) {
       if (cluster.velocityPort) {
         ports.push({ key: `vel-${cluster.id}`, label: `${cluster.name}  (Velocity)`, port: cluster.velocityPort, group: 'cluster' })
-      }
-      for (const srv of cluster.servers || []) {
-        if (srv.port) ports.push({ key: srv.id, label: `${cluster.name}  >  ${srv.name}`, port: srv.port, group: 'cluster' })
       }
     }
     for (const srv of d?.standalone || []) {
@@ -547,10 +612,199 @@ function SubTab({ active, onClick, children }) {
   )
 }
 
+// ─── ユーティリティ（Settings内で使用） ────────────────────────────────────
+function fmtBytes(bytes) {
+  if (bytes == null) return '—'
+  if (bytes >= 1024 ** 3) return (bytes / 1024 ** 3).toFixed(1) + ' GB'
+  if (bytes >= 1024 ** 2) return (bytes / 1024 ** 2).toFixed(0) + ' MB'
+  if (bytes >= 1024) return (bytes / 1024).toFixed(0) + ' KB'
+  return bytes + ' B'
+}
+
+function MiniGauge({ pct, color }) {
+  return (
+    <div style={{ flex: 1, height: 6, borderRadius: 99, background: 'var(--bg-section)', overflow: 'hidden', minWidth: 60 }}>
+      <div style={{ width: `${Math.min(100, pct)}%`, height: '100%', borderRadius: 99, background: color, transition: 'width 0.4s' }} />
+    </div>
+  )
+}
+
+// ─── 全サーバー パフォーマンス一覧 ──────────────────────────────────────────
+function AllPerformanceSection() {
+  const [allServers, setAllServers] = useState([]) // { id, name, serverDir, type, clusterName, jvmMemory }
+  const [serverStatuses, setServerStatuses] = useState({})
+  const [stats, setStats] = useState({})
+  const [diskSizes, setDiskSizes] = useState({})
+  const [diskLoading, setDiskLoading] = useState({})
+  const intervalRef = useRef(null)
+  const diskTimerRef = useRef(null)
+  const subscribedRef = useRef(new Set())
+
+  const calcDisk = useCallback((servers) => {
+    ;(servers || allServers).forEach(srv => {
+      if (!srv.serverDir) return
+      setDiskLoading(prev => ({ ...prev, [srv.id]: true }))
+      window.api.getDirSize(srv.serverDir).then(({ bytes }) => {
+        setDiskSizes(prev => ({ ...prev, [srv.id]: bytes }))
+        setDiskLoading(prev => { const n = {...prev}; delete n[srv.id]; return n })
+      })
+    })
+  }, [allServers])
+
+  // 5分ごとのディスク再計算タイマー
+  useEffect(() => {
+    diskTimerRef.current = setInterval(() => calcDisk(), 5 * 60 * 1000)
+    return () => clearInterval(diskTimerRef.current)
+  }, [calcDisk])
+
+  useEffect(() => {
+    window.api.loadData().then(data => {
+      const servers = [
+        ...(data.standalone || []).map(s => ({ ...s, clusterName: null })),
+        ...(data.clusters || []).flatMap(c => c.servers.map(s => ({ ...s, clusterName: c.name }))),
+      ]
+      setAllServers(servers)
+      // ポートチェックで起動中を検知
+      servers.forEach(async (s) => {
+        if (!s.port) return
+        const inUse = await window.api.checkPort({ port: s.port })
+        if (inUse) setServerStatuses(prev => ({ ...prev, [s.id]: 'running' }))
+      })
+      // ログイベント購読（起動・停止検知）
+      servers.forEach(s => {
+        if (subscribedRef.current.has(s.id)) return
+        subscribedRef.current.add(s.id)
+        window.api.onServerStarted(s.id, () => setServerStatuses(prev => ({ ...prev, [s.id]: 'running' })))
+        window.api.onServerStopped(s.id, () => setServerStatuses(prev => { const n = {...prev}; delete n[s.id]; return n }))
+      })
+      // ディスクサイズ計算（初回）
+      calcDisk(servers)
+    })
+  }, [])
+
+  // CPU / メモリ ポーリング
+  useEffect(() => {
+    const poll = async () => {
+      const runningIds = allServers.filter(s => serverStatuses[s.id]).map(s => s.id)
+      if (runningIds.length === 0) return
+      const result = await window.api.getProcessStats(runningIds)
+      if (result) setStats(prev => ({ ...prev, ...result }))
+    }
+    poll()
+    intervalRef.current = setInterval(poll, 3000)
+    return () => clearInterval(intervalRef.current)
+  }, [allServers, serverStatuses])
+
+  // クラスターでグループ化
+  const grouped = useMemo(() => {
+    const standalone = allServers.filter(s => !s.clusterName)
+    const clusterMap = {}
+    for (const s of allServers.filter(s => s.clusterName)) {
+      if (!clusterMap[s.clusterName]) clusterMap[s.clusterName] = []
+      clusterMap[s.clusterName].push(s)
+    }
+    return { standalone, clusters: Object.entries(clusterMap) }
+  }, [allServers])
+
+  const renderRow = (srv) => {
+    const running = !!serverStatuses[srv.id]
+    const s = stats[srv.id]
+    const maxMem = (srv.jvmMemory?.value || 2) * (srv.jvmMemory?.unit === 'M' ? 1 : 1024) * 1024 * 1024
+    const memPct = running && s ? Math.min(100, (s.memory / maxMem) * 100) : 0
+    const disk = diskSizes[srv.id]
+
+    return (
+      <div key={srv.id} style={{
+        display: 'grid', gridTemplateColumns: '180px 1fr 1fr 100px 80px',
+        alignItems: 'center', gap: 12, padding: '10px 14px',
+        borderBottom: '1px solid var(--border)',
+      }}>
+        {/* 名前 + 状態 */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+          <span style={{
+            width: 7, height: 7, borderRadius: '50%', flexShrink: 0,
+            background: running ? '#22c55e' : '#6b7280',
+            boxShadow: running ? '0 0 4px #22c55e' : 'none',
+          }} />
+          <span style={{ fontSize: 13, color: 'var(--text)', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{srv.name}</span>
+        </div>
+        {/* CPU */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <MiniGauge pct={running && s ? s.cpu : 0} color="linear-gradient(90deg,#6366f1,#8b5cf6)" />
+          <span style={{ fontSize: 11, color: running && s ? 'var(--text)' : 'var(--text-dim)', minWidth: 38, textAlign: 'right' }}>
+            {running && s ? `${s.cpu.toFixed(1)}%` : '—'}
+          </span>
+        </div>
+        {/* メモリ */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <MiniGauge pct={memPct} color="linear-gradient(90deg,#06b6d4,#0284c7)" />
+          <span style={{ fontSize: 11, color: running && s ? 'var(--text)' : 'var(--text-dim)', minWidth: 60, textAlign: 'right' }}>
+            {running && s ? fmtBytes(s.memory) : '—'}
+          </span>
+        </div>
+        {/* ディスク */}
+        <span style={{ fontSize: 12, color: 'var(--text-muted)', textAlign: 'right' }}>
+          {diskLoading[srv.id] ? '計算中...' : disk != null ? fmtBytes(disk) : '—'}
+        </span>
+        {/* タイプ */}
+        <span style={{ fontSize: 11, color: 'var(--text-dim)', textAlign: 'center', background: 'var(--bg-section)', borderRadius: 99, padding: '2px 8px' }}>
+          {srv.type === 'paper' ? 'Paper' : 'Fabric'}
+        </span>
+      </div>
+    )
+  }
+
+  if (allServers.length === 0) {
+    return <div style={{ color: 'var(--text-dim)', fontSize: 13, padding: 16 }}>サーバーがありません</div>
+  }
+
+  return (
+    <div style={{ marginTop: 12 }}>
+      {/* ヘッダー行 */}
+      <div style={{
+        display: 'grid', gridTemplateColumns: '180px 1fr 1fr 100px 80px',
+        gap: 12, padding: '6px 14px',
+        fontSize: 11, color: 'var(--text-dim)', fontWeight: 600,
+        borderBottom: '2px solid var(--border)',
+      }}>
+        <span>サーバー名</span>
+        <span>CPU</span>
+        <span>メモリ</span>
+        <span style={{ textAlign: 'right' }}>ディスク</span>
+        <span style={{ textAlign: 'center' }}>種別</span>
+      </div>
+
+      <div style={{ background: 'var(--bg-card)', borderRadius: 10, border: '1px solid var(--border)', overflow: 'hidden', marginTop: 8 }}>
+        {/* クラスター */}
+        {grouped.clusters.map(([clusterName, servers]) => (
+          <div key={clusterName}>
+            <div style={{ padding: '7px 14px', background: 'var(--bg-section)', fontSize: 11, fontWeight: 700, color: 'var(--text-accent)', borderBottom: '1px solid var(--border)' }}>
+              🖧 {clusterName}
+            </div>
+            {servers.map(renderRow)}
+          </div>
+        ))}
+        {/* スタンドアロン */}
+        {grouped.standalone.length > 0 && (
+          <div>
+            {grouped.clusters.length > 0 && (
+              <div style={{ padding: '7px 14px', background: 'var(--bg-section)', fontSize: 11, fontWeight: 700, color: 'var(--text-muted)', borderBottom: '1px solid var(--border)' }}>
+                🖥 スタンドアロン
+              </div>
+            )}
+            {grouped.standalone.map(renderRow)}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 // ─── メインコンポーネント ────────────────────────────────────────────────────
 function Settings() {
   const [baseDir, setBaseDir] = useState('')
   const [subTab, setSubTab] = useState('java')
+  const [needsRestart, setNeedsRestart] = useState(false)
 
   useEffect(() => {
     window.api.loadSettings().then(s => setBaseDir(s.baseDir || ''))
@@ -578,11 +832,13 @@ function Settings() {
         <SubTab active={subTab === 'java'} onClick={() => setSubTab('java')}>☕ Java管理</SubTab>
         <SubTab active={subTab === 'db'} onClick={() => setSubTab('db')}>🗄 SQL / DB</SubTab>
         <SubTab active={subTab === 'port'} onClick={() => setSubTab('port')}>🔓 ポート管理</SubTab>
+        <SubTab active={subTab === 'performance'} onClick={() => setSubTab('performance')}>📊 パフォーマンス</SubTab>
       </div>
 
       {subTab === 'java' && <JavaSection />}
-      {subTab === 'db'   && <DbSection baseDir={baseDir} />}
+      {subTab === 'db'   && <DbSection baseDir={baseDir} needsRestart={needsRestart} setNeedsRestart={setNeedsRestart} />}
       {subTab === 'port' && <PortSection />}
+      {subTab === 'performance' && <AllPerformanceSection />}
     </div>
   )
 }
