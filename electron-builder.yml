@@ -45,4 +45,4 @@ npmRebuild: false
 publish:
   provider: github
   owner: Simohayhe
-  repo: Beacon
+  repo: Minecraft-Manager
