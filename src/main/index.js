@@ -762,150 +762,153 @@ app.whenReady().then(() => {
     const serverDir = join(clusterDir, serverName)
     if (!existsSync(serverDir)) mkdirSync(serverDir, { recursive: true })
 
-    // Java path from settings
-    const settings = loadSettings()
-    const javas = settings.javaInstallations || []
-    const javaEntry = javas.find(j => j.majorVersion === 25) || javas.find(j => j.majorVersion === 21) || javas.find(j => j.majorVersion === 17) || javas.find(j => j.majorVersion === 8) || javas[0]
-    const javaBin = javaEntry ? javaEntry.path : 'java'
+    const { net } = await import('electron')
+    const fs = require('fs')
+    const send = (msg) => mainWindow.webContents.send('install-log', msg)
 
-    const installerUrl = 'https://maven.fabricmc.net/net/fabricmc/fabric-installer/1.0.1/fabric-installer-1.0.1.jar'
-    const installerPath = join(serverDir, 'fabric-installer.jar')
-
-    return new Promise((resolve) => {
-      const { net } = require('electron')
-      const fs = require('fs')
-
-      mainWindow.webContents.send('install-log', `${serverName}: インストーラーをダウンロード中...`)
-
-      const request = net.request(installerUrl)
-      request.on('response', (response) => {
-        const file = fs.createWriteStream(installerPath)
-        response.on('data', (chunk) => file.write(chunk))
-        response.on('end', () => {
-          file.close()
-          mainWindow.webContents.send('install-log', `${serverName}: Fabricをインストール中...`)
-
-          const proc = spawn(javaBin, [
-            '-Dfile.encoding=UTF-8', '-Dstdout.encoding=UTF-8', '-Dconsole.encoding=UTF-8',
-            '-Djavax.net.ssl.trustStoreType=WINDOWS-ROOT',
-            '-jar', installerPath,
-            'server', '-mcversion', mcVersion,
-            '-downloadMinecraft'
-          ], { cwd: serverDir, shell: false })
-
-          let procErrored = false
-          proc.on('error', (err) => {
-            procErrored = true
-            if (err.code === 'ENOENT') {
-              mainWindow.webContents.send('install-log', `[エラー] Javaが見つかりません。\nJavaをインストールするか、設定でJavaパスを指定してください。\n(実行しようとしたコマンド: ${javaBin})\n`)
-            } else {
-              mainWindow.webContents.send('install-log', `Javaエラー: ${err.message}\n設定でJavaパスを確認してください`)
-            }
-            resolve({ success: false })
-          })
-          proc.stdout.setEncoding('utf8')
-          proc.stderr.setEncoding('utf8')
-          proc.stdout.on('data', (d) => mainWindow.webContents.send('install-log', d))
-          proc.stderr.on('data', (d) => mainWindow.webContents.send('install-log', d))
-          proc.on('close', (code) => {
-            if (procErrored) return  // error ハンドラー側で処理済み
-            writeFileSync(join(serverDir, 'eula.txt'), 'eula=true\n')
-            const launchPropsPath = join(serverDir, 'fabric-server-launch.properties')
-            if (!existsSync(launchPropsPath)) {
-              writeFileSync(launchPropsPath, `fabric.gameVersion=${mcVersion}\n`)
-            }
-            const props = {
-              'accepts-transfers': 'true',
-              'allow-flight': 'true',
-              'broadcast-console-to-ops': 'true',
-              'broadcast-rcon-to-ops': 'true',
-              'bug-report-link': '',
-              'difficulty': 'normal',
-              'enable-code-of-conduct': 'false',
-              'enable-jmx-monitoring': 'false',
-              'enable-query': 'false',
-              'enable-rcon': 'false',
-              'enable-status': 'true',
-              'enforce-secure-profile': 'false',
-              'enforce-whitelist': 'false',
-              'entity-broadcast-range-percentage': '100',
-              'force-gamemode': 'false',
-              'function-permission-level': '2',
-              'gamemode': 'survival',
-              'generate-structures': 'true',
-              'generator-settings': '{}',
-              'hardcore': 'false',
-              'hide-online-players': 'false',
-              'initial-disabled-packs': '',
-              'initial-enabled-packs': 'vanilla',
-              'level-name': serverName,
-              'level-seed': '',
-              'level-type': 'minecraft\\:normal',
-              'log-ips': 'true',
-              'management-server-allowed-origins': '',
-              'management-server-enabled': 'false',
-              'management-server-host': '',
-              'management-server-port': '0',
-              'management-server-secret': '',
-              'management-server-tls-enabled': 'true',
-              'management-server-tls-keystore': '',
-              'management-server-tls-keystore-password': '',
-              'max-chained-neighbor-updates': '1000000',
-              'max-players': '20',
-              'max-tick-time': '60000',
-              'max-world-size': '29999984',
-              'motd': 'A Minecraft Server',
-              'network-compression-threshold': '512',
-              'online-mode': isCluster ? 'false' : 'true',
-              'op-permission-level': '4',
-              'pause-when-empty-seconds': '60',
-              'player-idle-timeout': '0',
-              'prevent-proxy-connections': 'false',
-              'pvp': 'true',
-              'query.port': '25565',
-              'rate-limit': '0',
-              'rcon.password': '',
-              'rcon.port': '25575',
-              'region-file-compression': 'deflate',
-              'require-resource-pack': 'false',
-              'resource-pack': '',
-              'resource-pack-id': '',
-              'resource-pack-prompt': '',
-              'resource-pack-sha1': '',
-              'server-ip': '',
-              'server-port': String(serverPort || 25565),
-              'simulation-distance': '10',
-              'spawn-animals': 'true',
-              'spawn-monsters': 'true',
-              'spawn-npcs': 'true',
-              'spawn-protection': '0',
-              'status-heartbeat-interval': '0',
-              'sync-chunk-writes': 'true',
-              'text-filtering-config': '',
-              'text-filtering-version': '0',
-              'use-native-transport': 'true',
-              'view-distance': '10',
-              'white-list': 'false',
-            }
-            const propsContent = Object.entries(props).map(([k, v]) => `${k}=${v}`).join('\n')
-            writeFileSync(join(serverDir, 'server.properties'), propsContent)
-            writeFileSync(join(serverDir, 'start.bat'),
-              `@echo off\njava -Xms2G -Xmx2G -jar fabric-server-launch.jar nogui\npause`)
-            if (code === 0) {
-              mainWindow.webContents.send('install-log', `${serverName}: インストール完了！`)
-            } else {
-              mainWindow.webContents.send('install-log', `${serverName}: インストールに失敗しました (終了コード: ${code})`)
-            }
-            resolve({ success: code === 0, serverDir })
-          })
-        })
+    const netGet = (url) => new Promise((resolve, reject) => {
+      const req = net.request({ url, method: 'GET', headers: { 'User-Agent': 'Mozilla/5.0' } })
+      let data = ''
+      req.on('response', (r) => {
+        if (r.statusCode >= 400) { r.resume(); return reject(new Error(`HTTP ${r.statusCode}: ${url}`)) }
+        r.on('data', c => { data += c })
+        r.on('end', () => { try { resolve(JSON.parse(data)) } catch { resolve(data) } })
       })
-      request.on('error', (e) => {
-        mainWindow.webContents.send('install-log', `エラー: ${e.message}`)
-        resolve({ success: false })
-      })
-      request.end()
+      req.on('error', reject)
+      req.end()
     })
+    const netDownload = (url, destPath) => new Promise((resolve, reject) => {
+      const req = net.request({ url, method: 'GET', headers: { 'User-Agent': 'Mozilla/5.0' } })
+      req.on('response', (r) => {
+        if (r.statusCode >= 400) { r.resume(); return reject(new Error(`HTTP ${r.statusCode}: ${url}`)) }
+        const file = fs.createWriteStream(destPath)
+        r.on('data', c => file.write(c))
+        r.on('end', () => { file.close(); resolve() })
+        r.on('error', reject)
+      })
+      req.on('error', reject)
+      req.end()
+    })
+
+    try {
+      // 1. Fabric ローダーバージョン取得
+      send(`${serverName}: Fabricバージョン情報を取得中...`)
+      const loaderList = await netGet(`https://meta.fabricmc.net/v2/versions/loader/${mcVersion}?limit=1`)
+      if (!loaderList || loaderList.length === 0) throw new Error(`Fabric loader が ${mcVersion} に対応していません`)
+      const loaderVersion = loaderList[0].loader.version
+
+      // 2. Fabricインストーラーバージョン取得
+      const installerList = await netGet(`https://meta.fabricmc.net/v2/versions/installer?limit=1`)
+      if (!installerList || installerList.length === 0) throw new Error('Fabricインストーラー情報の取得に失敗しました')
+      const installerVersion = installerList[0].version
+
+      send(`${serverName}: Loader ${loaderVersion} / Installer ${installerVersion}`)
+
+      // 3. Fabric サーバー起動JARをダウンロード（Java不要・Node.jsで直接取得）
+      send(`${serverName}: fabric-server-launch.jar をダウンロード中...`)
+      const fabricLaunchUrl = `https://meta.fabricmc.net/v2/versions/loader/${mcVersion}/${loaderVersion}/${installerVersion}/server/jar`
+      await netDownload(fabricLaunchUrl, join(serverDir, 'fabric-server-launch.jar'))
+
+      // 4. Minecraft server.jar を Mojang API から取得
+      send(`${serverName}: Minecraft server.jar をダウンロード中...`)
+      const manifest = await netGet('https://launchermeta.mojang.com/mc/game/version_manifest_v2.json')
+      const versionEntry = manifest.versions.find(v => v.id === mcVersion)
+      if (!versionEntry) throw new Error(`MCバージョン ${mcVersion} がマニフェストに見つかりません`)
+      const versionInfo = await netGet(versionEntry.url)
+      const serverJarUrl = versionInfo.downloads?.server?.url
+      if (!serverJarUrl) throw new Error('server.jar のダウンロードURLが取得できませんでした')
+      await netDownload(serverJarUrl, join(serverDir, 'server.jar'))
+
+      send(`${serverName}: ファイルを構成中...`)
+
+      // fabric-server-launch.properties（server.jar の場所を指定）
+      writeFileSync(join(serverDir, 'fabric-server-launch.properties'), `serverJar=server.jar\n`)
+      writeFileSync(join(serverDir, 'eula.txt'), 'eula=true\n')
+
+      const props = {
+        'accepts-transfers': 'true',
+        'allow-flight': 'true',
+        'broadcast-console-to-ops': 'true',
+        'broadcast-rcon-to-ops': 'true',
+        'bug-report-link': '',
+        'difficulty': 'normal',
+        'enable-code-of-conduct': 'false',
+        'enable-jmx-monitoring': 'false',
+        'enable-query': 'false',
+        'enable-rcon': 'false',
+        'enable-status': 'true',
+        'enforce-secure-profile': 'false',
+        'enforce-whitelist': 'false',
+        'entity-broadcast-range-percentage': '100',
+        'force-gamemode': 'false',
+        'function-permission-level': '2',
+        'gamemode': 'survival',
+        'generate-structures': 'true',
+        'generator-settings': '{}',
+        'hardcore': 'false',
+        'hide-online-players': 'false',
+        'initial-disabled-packs': '',
+        'initial-enabled-packs': 'vanilla',
+        'level-name': serverName,
+        'level-seed': '',
+        'level-type': 'minecraft\\:normal',
+        'log-ips': 'true',
+        'management-server-allowed-origins': '',
+        'management-server-enabled': 'false',
+        'management-server-host': '',
+        'management-server-port': '0',
+        'management-server-secret': '',
+        'management-server-tls-enabled': 'true',
+        'management-server-tls-keystore': '',
+        'management-server-tls-keystore-password': '',
+        'max-chained-neighbor-updates': '1000000',
+        'max-players': '20',
+        'max-tick-time': '60000',
+        'max-world-size': '29999984',
+        'motd': 'A Minecraft Server',
+        'network-compression-threshold': '512',
+        'online-mode': isCluster ? 'false' : 'true',
+        'op-permission-level': '4',
+        'pause-when-empty-seconds': '60',
+        'player-idle-timeout': '0',
+        'prevent-proxy-connections': 'false',
+        'pvp': 'true',
+        'query.port': '25565',
+        'rate-limit': '0',
+        'rcon.password': '',
+        'rcon.port': '25575',
+        'region-file-compression': 'deflate',
+        'require-resource-pack': 'false',
+        'resource-pack': '',
+        'resource-pack-id': '',
+        'resource-pack-prompt': '',
+        'resource-pack-sha1': '',
+        'server-ip': '',
+        'server-port': String(serverPort || 25565),
+        'simulation-distance': '10',
+        'spawn-animals': 'true',
+        'spawn-monsters': 'true',
+        'spawn-npcs': 'true',
+        'spawn-protection': '0',
+        'status-heartbeat-interval': '0',
+        'sync-chunk-writes': 'true',
+        'text-filtering-config': '',
+        'text-filtering-version': '0',
+        'use-native-transport': 'true',
+        'view-distance': '10',
+        'white-list': 'false',
+      }
+      const propsContent = Object.entries(props).map(([k, v]) => `${k}=${v}`).join('\n')
+      writeFileSync(join(serverDir, 'server.properties'), propsContent)
+      writeFileSync(join(serverDir, 'start.bat'),
+        `@echo off\njava -Xms2G -Xmx2G -jar fabric-server-launch.jar nogui\npause`)
+
+      send(`${serverName}: インストール完了！`)
+      return { success: true, serverDir }
+    } catch (e) {
+      send(`${serverName}: インストールに失敗しました\n${e.message}`)
+      return { success: false }
+    }
   })
 
   ipcMain.handle('setup-fabric-proxy', async (_, { serverDir, mcVersion, forwardingSecret }) => {
