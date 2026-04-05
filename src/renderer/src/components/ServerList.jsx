@@ -2522,6 +2522,7 @@ function ServerList({ onNavigateToJava }) {
   const [deleteClusterConfirm2, setDeleteClusterConfirm2] = useState(null)
   const [deleteClusterFiles, setDeleteClusterFiles] = useState(false)
   const [requiredModsWarn, setRequiredModsWarn] = useState(null) // { server, cluster, missing, pendingStart }
+  const [javaWarn, setJavaWarn] = useState(null) // { required } — Java未設定警告
   const [serverStatuses, setServerStatuses] = useState({})
   const [velocityStatuses, setVelocityStatuses] = useState({})
   const [velocityWarn, setVelocityWarn] = useState(null)
@@ -2628,7 +2629,7 @@ function ServerList({ onNavigateToJava }) {
         installs.some(j => j.majorVersion >= required)
       )
       if (!hasCompatible) {
-        onNavigateToJava?.()
+        setJavaWarn({ required })
         return
       }
     }
@@ -3243,6 +3244,27 @@ function ServerList({ onNavigateToJava }) {
           onImportCluster={importCluster}
           onImportStandalone={importStandalone}
         />
+      )}
+
+      {/* Java未設定の警告ダイアログ */}
+      {javaWarn && (
+        <div className="modal-overlay" onClick={() => setJavaWarn(null)}>
+          <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 420 }}>
+            <div className="modal-title">☕ Java が見つかりません</div>
+            <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 16, lineHeight: 1.7 }}>
+              このサーバーの起動には
+              <span style={{ color: 'var(--text)', fontWeight: 700 }}> Java {javaWarn.required ?? '(バージョン不明)'} </span>
+              以上が必要ですが、インストールされていません。<br />
+              設定 → Java管理 からインストールしてください。
+            </div>
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <button className="btn" onClick={() => setJavaWarn(null)}>キャンセル</button>
+              <button className="btn btn-start" onClick={() => { setJavaWarn(null); onNavigateToJava?.() }}>
+                Java管理へ →
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* 必須Mod不足の警告ダイアログ */}
