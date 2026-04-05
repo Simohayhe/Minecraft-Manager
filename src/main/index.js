@@ -787,6 +787,7 @@ app.whenReady().then(() => {
 
           const proc = spawn(javaBin, [
             '-Dfile.encoding=UTF-8', '-Dstdout.encoding=UTF-8', '-Dconsole.encoding=UTF-8',
+            '-Djavax.net.ssl.trustStoreType=WINDOWS-ROOT',
             '-jar', installerPath,
             'server', '-mcversion', mcVersion,
             '-downloadMinecraft'
