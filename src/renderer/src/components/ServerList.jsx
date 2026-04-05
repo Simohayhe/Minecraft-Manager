@@ -620,7 +620,7 @@ function ModPluginTab({ server, cluster, onUpdateServer }) {
   )
 }
 
-function AddServerModal({ onAdd, onClose, baseDir, cluster }) {
+function AddServerModal({ onAdd, onClose, baseDir, cluster, onNavigateToJava }) {
   const [name, setName] = useState('')
   const [port, setPort] = useState('25565')
   const [serverType, setServerType] = useState('fabric')
@@ -654,6 +654,20 @@ function AddServerModal({ onAdd, onClose, baseDir, cluster }) {
     if (!baseDir) { setError('設定でサーバーベースフォルダを指定してください'); return }
     if (!name.trim()) { setError('サーバー名を入力してください'); return }
     if (!mcVersion) { setError('バージョンを選択してください'); return }
+
+    // Java チェック
+    const s = await window.api.loadSettings()
+    const installs = s.javaInstallations || []
+    const required = getRequiredJavaMajor(mcVersion)
+    const hasCompatible = installs.length > 0 && (
+      required === null || required <= 8 || installs.some(j => j.majorVersion >= required)
+    )
+    if (!hasCompatible) {
+      setError(`Java ${required ?? ''}が必要です。設定 → Java管理からインストールしてください。`)
+      if (onNavigateToJava) setTimeout(() => { onClose(); onNavigateToJava() }, 1500)
+      return
+    }
+
     setInstalling(true)
     const serverPort = parseInt(port) || 25565
     const installOpts = { serverName: name.trim(), mcVersion, baseDir, clusterName: cluster?.name || 'standalone', serverPort, voidWorld: serverType === 'paper' ? voidWorld : false }
@@ -3233,7 +3247,7 @@ function ServerList({ onNavigateToJava }) {
         </div>
       )}
       {addServerTarget && (
-        <AddServerModal onAdd={addServer} onClose={() => setAddServerTarget(null)} baseDir={settings.baseDir} cluster={addServerTarget === 'standalone' ? null : activeCluster} />
+        <AddServerModal onAdd={addServer} onClose={() => setAddServerTarget(null)} baseDir={settings.baseDir} cluster={addServerTarget === 'standalone' ? null : activeCluster} onNavigateToJava={onNavigateToJava} />
       )}
       {showAddCluster && (
         <AddClusterModal onAdd={addCluster} onClose={() => setShowAddCluster(false)} baseDir={settings.baseDir} />

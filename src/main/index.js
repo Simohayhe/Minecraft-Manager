@@ -792,7 +792,9 @@ app.whenReady().then(() => {
             '-downloadMinecraft'
           ], { cwd: serverDir, shell: false })
 
+          let procErrored = false
           proc.on('error', (err) => {
+            procErrored = true
             if (err.code === 'ENOENT') {
               mainWindow.webContents.send('install-log', `[エラー] Javaが見つかりません。\nJavaをインストールするか、設定でJavaパスを指定してください。\n(実行しようとしたコマンド: ${javaBin})\n`)
             } else {
@@ -805,6 +807,7 @@ app.whenReady().then(() => {
           proc.stdout.on('data', (d) => mainWindow.webContents.send('install-log', d))
           proc.stderr.on('data', (d) => mainWindow.webContents.send('install-log', d))
           proc.on('close', (code) => {
+            if (procErrored) return  // error ハンドラー側で処理済み
             writeFileSync(join(serverDir, 'eula.txt'), 'eula=true\n')
             const launchPropsPath = join(serverDir, 'fabric-server-launch.properties')
             if (!existsSync(launchPropsPath)) {
@@ -887,7 +890,11 @@ app.whenReady().then(() => {
             writeFileSync(join(serverDir, 'server.properties'), propsContent)
             writeFileSync(join(serverDir, 'start.bat'),
               `@echo off\njava -Xms2G -Xmx2G -jar fabric-server-launch.jar nogui\npause`)
-            mainWindow.webContents.send('install-log', `${serverName}: インストール完了！`)
+            if (code === 0) {
+              mainWindow.webContents.send('install-log', `${serverName}: インストール完了！`)
+            } else {
+              mainWindow.webContents.send('install-log', `${serverName}: インストールに失敗しました (終了コード: ${code})`)
+            }
             resolve({ success: code === 0, serverDir })
           })
         })
